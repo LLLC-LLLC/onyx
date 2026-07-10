@@ -1,3 +1,15 @@
+import { mutate } from "swr";
+
+/** Revalidate every notifications cache: the mixed feed (useSWRInfinite keys
+ * serialize with a $inf$ prefix, so match by inclusion), the by-type variants,
+ * and the summary badge. Call after any dismissal so every surface showing a
+ * notification (bell popover, banner queue, badge) updates together. */
+export function invalidateNotificationCaches(): Promise<unknown> {
+  return mutate(
+    (key) => typeof key === "string" && key.includes("/api/notifications")
+  );
+}
+
 async function handleNotificationMutation(
   response: Response,
   fallbackMessage: string
