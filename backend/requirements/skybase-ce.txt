@@ -1,0 +1,2 @@
+# Pinned Community Edition backend dependency lock.
+-r default.txt
