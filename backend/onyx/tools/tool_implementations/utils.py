@@ -1,10 +1,22 @@
 import json
+from dataclasses import dataclass
+from typing import Any
 
 from onyx.context.search.models import InferenceSection
+from onyx.context.search.models import ProgrammaticSearchResult
 from onyx.context.search.utils import sandbox_filename_for_document
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
+
+
+@dataclass(frozen=True)
+class ProgrammaticSearchConversion:
+    """Shared serialized and typed representations of final search sections."""
+
+    llm_facing_response: str
+    citation_mapping: dict[int, str]
+    programmatic_search_results: list[ProgrammaticSearchResult]
 
 
 def truncate_output(output: str, max_length: int, label: str = "output") -> str:
@@ -26,19 +38,15 @@ FILE_ASSOCIATED_GUIDANCE = (
 )
 
 
-def convert_inference_sections_to_llm_string(
+def _serialize_inference_sections(
     top_sections: list[InferenceSection],
     citation_start: int = 1,
     limit: int | None = None,
     include_source_type: bool = True,
     include_link: bool = False,
     include_document_id: bool = False,
-    note: str | None = None,
-) -> tuple[str, dict[int, str]]:
-    """Convert InferenceSection objects to a JSON string for LLM.
-
-    Returns a JSON string with document results and a citation mapping.
-    """
+) -> tuple[list[InferenceSection], list[dict[str, Any]], dict[int, str]]:
+    """Render final sections once for both LLM and programmatic search paths."""
     # Apply limit if specified
     if limit is not None:
         top_sections = top_sections[:limit]
@@ -114,12 +122,107 @@ def convert_inference_sections_to_llm_string(
             result["metadata"] = json.dumps(chunk.metadata, ensure_ascii=False)
         results.append(result)
 
-    payload: dict[str, object] = {}
-    payload["results"] = results
+    return top_sections, results, citation_mapping
+
+
+def _llm_response_from_results(results: list[dict[str, Any]], note: str | None) -> str:
+    payload: dict[str, object] = {"results": results}
     if note:
         payload["note"] = note
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _programmatic_result_from_section(
+    section: InferenceSection, result: dict[str, Any]
+) -> ProgrammaticSearchResult:
+    chunks = section.chunks
+    if not chunks:
+        raise ValueError(
+            "Programmatic search results require every section to contain at least one chunk."
+        )
+
+    document_id = section.center_chunk.document_id
+    if not document_id or any(chunk.document_id != document_id for chunk in chunks):
+        raise ValueError(
+            "Programmatic search results require all section chunks to share a document identity."
+        )
+
+    center_chunk_id = section.center_chunk.chunk_id
+    chunk_ids = [chunk.chunk_id for chunk in chunks]
+    if center_chunk_id not in chunk_ids:
+        raise ValueError(
+            "Programmatic search results require the center chunk to belong to its section."
+        )
+
+    return ProgrammaticSearchResult(
+        citation_id=result["document"],
+        document_id=document_id,
+        section_start_chunk_id=min(chunk_ids),
+        section_end_chunk_id=max(chunk_ids),
+        title=result["title"],
+        content=result["content"],
+        link=result.get("url"),
+        source_type=result["source_type"],
+        updated_at=result.get("updated_at"),
+    )
+
+
+def convert_inference_sections_to_programmatic_search_response(
+    top_sections: list[InferenceSection],
+    citation_start: int = 1,
+    limit: int | None = None,
+    include_source_type: bool = True,
+    include_link: bool = False,
+    include_document_id: bool = False,
+    note: str | None = None,
+) -> ProgrammaticSearchConversion:
+    """Preserve merged-section identities alongside the LLM display response."""
+
+    if not include_source_type:
+        raise ValueError("Programmatic search results require a source type.")
+
+    sections, results, citation_mapping = _serialize_inference_sections(
+        top_sections=top_sections,
+        citation_start=citation_start,
+        limit=limit,
+        include_source_type=include_source_type,
+        include_link=include_link,
+        include_document_id=include_document_id,
+    )
+    return ProgrammaticSearchConversion(
+        llm_facing_response=_llm_response_from_results(results, note),
+        citation_mapping=citation_mapping,
+        programmatic_search_results=[
+            _programmatic_result_from_section(section, result)
+            for section, result in zip(sections, results, strict=True)
+        ],
+    )
+
+
+def convert_inference_sections_to_llm_string(
+    top_sections: list[InferenceSection],
+    citation_start: int = 1,
+    limit: int | None = None,
+    include_source_type: bool = True,
+    include_link: bool = False,
+    include_document_id: bool = False,
+    note: str | None = None,
+) -> tuple[str, dict[int, str]]:
+    """Convert InferenceSection objects to a JSON string for LLM.
+
+    Returns a JSON string with document results and a citation mapping.
+    """
+
+    _, results, citation_mapping = _serialize_inference_sections(
+        top_sections=top_sections,
+        citation_start=citation_start,
+        limit=limit,
+        include_source_type=include_source_type,
+        include_link=include_link,
+        include_document_id=include_document_id,
+    )
 
     return (
-        json.dumps(payload, indent=2, ensure_ascii=False),
+        _llm_response_from_results(results, note),
         citation_mapping,
     )

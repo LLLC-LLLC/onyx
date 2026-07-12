@@ -69,8 +69,14 @@ permitted.
 - The eight audited CE migrations, `backend/alembic/env.py`, the two KG
   trigram call sites, the bounded Celery app/configuration paths, and the
   v1 FileStore/native-surface gates.
+- The T5C programmatic search identity contract:
+  `backend/onyx/context/search/models.py`,
+  `backend/onyx/tools/tool_implementations/utils.py`,
+  `backend/onyx/tools/tool_implementations/search/search_tool.py`, and
+  `backend/onyx/server/features/search/{api,models}.py`, plus the CLI raw
+  response paths `cli/{cmd/search.go,cmd/search_test.go,internal/models/models.go,internal/api/client_test.go}`.
 - Focused contract tests under `backend/tests/unit/onyx/db/engine/` and
-  `backend/tests/unit/scripts/`.
+  `backend/tests/unit/scripts/`, plus the T5C programmatic-search tests.
 
 The verifier checks the pinned-commit-to-HEAD diff, tracked working-tree
 changes, and both ordinary and ignored untracked files against this exact
@@ -135,6 +141,20 @@ later task may expand the allowlist only through a reviewed contract update.
 - The host launchers parse only the renderer's known `KEY=value` fields and
   start Alembic and post-migration `psql` under scrubbed environments.
   Unrelated desktop or CI secrets are never inherited by CE migration tools.
+
+## Programmatic Search Identity Contract
+
+- `/api/search` preserves its query-local `citation_id` and additionally
+  returns `document_id`, `section_start_chunk_id`, and
+  `section_end_chunk_id` for every internal result. Citation IDs are display
+  references, not authorization identifiers.
+- The stable values come directly from the final merged `InferenceSection` and
+  its chunks. The API does not recover them from titles, links, content, display
+  JSON, or citation ordering. A section without a document identity or chunk
+  boundaries fails response construction rather than producing an ambiguous
+  result.
+- `onyx-cli search --raw` preserves the same stable identity fields. Its default
+  output remains a lean display projection.
 
 ## Update Procedure
 

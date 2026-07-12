@@ -10,7 +10,6 @@ Not the same as the Onyx Search UI backend at /api/search/send-search-message
 directly — a lighter-weight flow with optional query expansion.
 """
 
-import json
 from datetime import timezone
 from typing import cast
 
@@ -24,6 +23,7 @@ from onyx.chat.emitter import NullEmitter
 from onyx.configs.constants import MessageType
 from onyx.context.search.models import BaseFilters
 from onyx.context.search.models import PersonaSearchInfo
+from onyx.context.search.models import SearchDocsResponse
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import Permission
 from onyx.db.llm import can_user_access_llm_provider
@@ -49,10 +49,30 @@ from onyx.server.utils_vector_db import require_vector_db
 from onyx.tools.constants import SEARCH_TOOL_ID
 from onyx.tools.models import ChatMinimalTextMessage
 from onyx.tools.models import SearchToolOverrideKwargs
+from onyx.tools.models import ToolResponse
 from onyx.tools.tool_implementations.search.search_tool import SearchTool
 from shared_configs.contextvars import get_current_tenant_id
 
 router = APIRouter(prefix="/search")
+
+
+def search_response_from_tool_response(tool_response: ToolResponse) -> SearchResponse:
+    """Map the SearchTool's typed final-section contract into the HTTP response."""
+
+    rich_response = tool_response.rich_response
+    if not isinstance(rich_response, SearchDocsResponse):
+        raise RuntimeError("SearchTool did not return a typed search response.")
+    if rich_response.programmatic_search_results is None:
+        raise RuntimeError(
+            "SearchTool did not return typed programmatic search results."
+        )
+
+    return SearchResponse(
+        results=[
+            SearchResult(**result.model_dump())
+            for result in rich_response.programmatic_search_results
+        ]
+    )
 
 
 @router.post("", dependencies=[Depends(require_vector_db)])
@@ -188,19 +208,6 @@ def search(
         queries=[request.query],
     )
 
-    # 8. Map LLM-facing JSON entries to SearchResults (one per merged section).
-    llm_facing_text = tool_response.llm_facing_response
-    entries = json.loads(llm_facing_text)["results"] if llm_facing_text else []
-    return SearchResponse(
-        results=[
-            SearchResult(
-                citation_id=entry["document"],
-                title=entry["title"],
-                content=entry["content"],
-                link=entry.get("url"),
-                source_type=entry["source_type"],
-                updated_at=entry.get("updated_at"),
-            )
-            for entry in entries
-        ],
-    )
+    # 8. Return the typed final-section results without recovering identity
+    # from the LLM-facing display JSON.
+    return search_response_from_tool_response(tool_response)

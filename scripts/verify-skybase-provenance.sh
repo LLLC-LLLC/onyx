@@ -46,6 +46,7 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/background/indexing/job_client.py"
     "backend/onyx/configs/app_configs.py"
     "backend/onyx/configs/constants.py"
+    "backend/onyx/context/search/models.py"
     "backend/onyx/db/engine/async_sql_engine.py"
     "backend/onyx/db/engine/connection_warmup.py"
     "backend/onyx/db/engine/sql_engine.py"
@@ -54,15 +55,26 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/kg/clustering/clustering.py"
     "backend/onyx/kg/clustering/normalizations.py"
     "backend/onyx/main.py"
+    "backend/onyx/server/features/search/api.py"
+    "backend/onyx/server/features/search/models.py"
     "backend/onyx/server/metrics/metrics_server.py"
     "backend/onyx/shared_supabase_health.py"
     "backend/onyx/setup.py"
+    "backend/onyx/tools/tool_implementations/search/search_tool.py"
+    "backend/onyx/tools/tool_implementations/utils.py"
     "backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py"
+    "backend/tests/unit/onyx/server/features/search/test_programmatic_search_response.py"
     "backend/tests/unit/onyx/test_shared_supabase_health.py"
+    "backend/tests/unit/onyx/tools/test_programmatic_search_results.py"
+    "backend/tests/unit/onyx/tools/tool_implementations/search/test_programmatic_search_handoff.py"
     "backend/tests/unit/server/metrics/test_metrics_server.py"
     "backend/tests/unit/alembic/test_skybase_shared_supabase_alembic_contract.py"
     "backend/tests/unit/scripts/test_skybase_supabase_scripts.py"
     "backend/tests/unit/scripts/test_skybase_post_migration_grants.py"
+    "cli/cmd/search.go"
+    "cli/cmd/search_test.go"
+    "cli/internal/api/client_test.go"
+    "cli/internal/models/models.go"
 )
 readonly COPIED_SOURCE_ROOTS=(
     "backend/alembic"
@@ -346,6 +358,10 @@ readonly GRANTS_LAUNCHER_FILE="${REPO_ROOT}/scripts/apply-skybase-ce-post-migrat
 readonly PRIVATE_ENV_LIB_FILE="${REPO_ROOT}/scripts/_lib/skybase-ce-private-env.sh"
 readonly HEALTH_APP_FILE="${REPO_ROOT}/backend/onyx/shared_supabase_health.py"
 readonly METRICS_SERVER_FILE="${REPO_ROOT}/backend/onyx/server/metrics/metrics_server.py"
+readonly PROGRAMMATIC_SEARCH_API_FILE="${REPO_ROOT}/backend/onyx/server/features/search/api.py"
+readonly PROGRAMMATIC_SEARCH_MODEL_FILE="${REPO_ROOT}/backend/onyx/server/features/search/models.py"
+readonly PROGRAMMATIC_SEARCH_TOOL_FILE="${REPO_ROOT}/backend/onyx/tools/tool_implementations/search/search_tool.py"
+readonly PROGRAMMATIC_SEARCH_CLI_MODEL_FILE="${REPO_ROOT}/cli/internal/models/models.go"
 for contract_line in \
     'SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"' \
     'MAX_RUNTIME_CONNECTIONS: Final = 12' \
@@ -419,6 +435,30 @@ grep -Fq -- 'onyx.shared_supabase_health:app, not onyx.main:app.' \
 grep -Fq -- 'if is_shared_supabase_profile():' "${METRICS_SERVER_FILE}" || \
     fail "shared profile must disable standalone worker metrics servers"
 
+for search_contract_line in \
+    'document_id: str' \
+    'section_start_chunk_id: int' \
+    'section_end_chunk_id: int' \
+    'return search_response_from_tool_response(tool_response)' \
+    'convert_inference_sections_to_programmatic_search_response' \
+    'programmatic_search_results='; do
+    grep -Fq -- "${search_contract_line}" \
+        "${PROGRAMMATIC_SEARCH_API_FILE}" \
+        "${PROGRAMMATIC_SEARCH_MODEL_FILE}" \
+        "${PROGRAMMATIC_SEARCH_TOOL_FILE}" || \
+        fail "programmatic search identity contract is missing: ${search_contract_line}"
+done
+if grep -nF -- 'json.loads(' "${PROGRAMMATIC_SEARCH_API_FILE}"; then
+    fail "programmatic search API must not recover identity from display JSON"
+fi
+for cli_contract_line in \
+    'DocumentID          string  `json:"document_id"`' \
+    'SectionStartChunkID int     `json:"section_start_chunk_id"`' \
+    'SectionEndChunkID   int     `json:"section_end_chunk_id"'; do
+    grep -Fq -- "${cli_contract_line}" "${PROGRAMMATIC_SEARCH_CLI_MODEL_FILE}" || \
+        fail "programmatic search CLI identity contract is missing: ${cli_contract_line}"
+done
+
 for denied_worker in primary light heavy user_file_processing scheduled_tasks monitoring beat client; do
     grep -Fq -- "assert_worker_app_allowed(\"${denied_worker}\")" \
         "${REPO_ROOT}/backend/onyx/background/celery/apps/${denied_worker}.py" || \
@@ -445,6 +485,15 @@ grep -Fq -- '# file-under-test: backend/onyx/shared_supabase_health.py' \
 grep -Fq -- '# file-under-test: scripts/apply-skybase-ce-post-migration-grants.sh' \
     "${REPO_ROOT}/backend/tests/unit/scripts/test_skybase_post_migration_grants.py" || \
     fail "post-migration grants test must name its file under test"
+grep -Fq -- '# file-under-test: backend/onyx/server/features/search/api.py' \
+    "${REPO_ROOT}/backend/tests/unit/onyx/server/features/search/test_programmatic_search_response.py" || \
+    fail "programmatic search API test must name its file under test"
+grep -Fq -- '# file-under-test: backend/onyx/tools/tool_implementations/utils.py' \
+    "${REPO_ROOT}/backend/tests/unit/onyx/tools/test_programmatic_search_results.py" || \
+    fail "programmatic search utility test must name its file under test"
+grep -Fq -- '# file-under-test: backend/onyx/tools/tool_implementations/search/search_tool.py' \
+    "${REPO_ROOT}/backend/tests/unit/onyx/tools/tool_implementations/search/test_programmatic_search_handoff.py" || \
+    fail "programmatic search tool test must name its file under test"
 
 renderer_pyc="$(mktemp "${TMPDIR:-/tmp}/skybase-renderer.XXXXXX.pyc")"
 trap 'rm -f "${renderer_pyc}"' EXIT

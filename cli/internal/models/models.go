@@ -118,14 +118,18 @@ type SearchRequest struct {
 //
 // Content is the full chunk text the LLM saw for this section. Multiple
 // results may share a CitationID when the LLM selected multiple
-// non-overlapping sections of the same document.
+// non-overlapping sections of the same document. DocumentID and section
+// chunk bounds are the stable source identities exposed by the API.
 type SearchResult struct {
-	CitationID *int    `json:"citation_id"`
-	Title      string  `json:"title"`
-	Content    string  `json:"content"`
-	Link       *string `json:"link"`
-	SourceType string  `json:"source_type"`
-	UpdatedAt  *string `json:"updated_at"`
+	CitationID          *int    `json:"citation_id"`
+	DocumentID          string  `json:"document_id"`
+	SectionStartChunkID int     `json:"section_start_chunk_id"`
+	SectionEndChunkID   int     `json:"section_end_chunk_id"`
+	Title               string  `json:"title"`
+	Content             string  `json:"content"`
+	Link                *string `json:"link"`
+	SourceType          string  `json:"source_type"`
+	UpdatedAt           *string `json:"updated_at"`
 }
 
 // SearchResponse is the response from POST /api/search.

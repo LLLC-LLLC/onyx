@@ -119,7 +119,7 @@ from onyx.tools.tool_implementations.search.search_utils import (
     weighted_reciprocal_rank_fusion,
 )
 from onyx.tools.tool_implementations.utils import (
-    convert_inference_sections_to_llm_string,
+    convert_inference_sections_to_programmatic_search_response,
 )
 from onyx.utils.logger import setup_logger
 from onyx.utils.threadpool_concurrency import run_functions_tuples_in_parallel
@@ -1001,17 +1001,22 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
 
         if not top_sections:
             logger.info("Search tool - no results found, returning empty response")
-            empty_response, _ = convert_inference_sections_to_llm_string(
-                top_sections=[],
-                note=scope_note or None,
+            empty_conversion = (
+                convert_inference_sections_to_programmatic_search_response(
+                    top_sections=[],
+                    note=scope_note or None,
+                )
             )
             return ToolResponse(
                 rich_response=SearchDocsResponse(
                     search_docs=[],
                     citation_mapping={},
                     displayed_docs=None,
+                    programmatic_search_results=(
+                        empty_conversion.programmatic_search_results
+                    ),
                 ),
-                llm_facing_response=empty_response,
+                llm_facing_response=empty_conversion.llm_facing_response,
             )
 
         # Enrich chunks with `Document.file_id` (Postgres-only metadata not
@@ -1147,14 +1152,18 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
         # This prevents duplicate content and reduces token usage
         merged_sections = merge_overlapping_sections(expanded_sections)
 
-        docs_str, citation_mapping = convert_inference_sections_to_llm_string(
-            top_sections=merged_sections,
-            citation_start=override_kwargs.starting_citation_num,
-            limit=override_kwargs.max_llm_chunks,
-            include_document_id=False,
-            include_link=override_kwargs.include_link,
-            note=scope_note or None,
+        programmatic_conversion = (
+            convert_inference_sections_to_programmatic_search_response(
+                top_sections=merged_sections,
+                citation_start=override_kwargs.starting_citation_num,
+                limit=override_kwargs.max_llm_chunks,
+                include_document_id=False,
+                include_link=override_kwargs.include_link,
+                note=scope_note or None,
+            )
         )
+        docs_str = programmatic_conversion.llm_facing_response
+        citation_mapping = programmatic_conversion.citation_mapping
 
         # End overall timing
         overall_elapsed = time.time() - overall_start_time
@@ -1173,6 +1182,9 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
                 search_docs=search_docs,
                 citation_mapping=citation_mapping,
                 displayed_docs=final_ui_docs,
+                programmatic_search_results=(
+                    programmatic_conversion.programmatic_search_results
+                ),
             ),
             # The LLM facing response typically includes less docs to cut down on noise and token usage
             llm_facing_response=llm_facing_response,

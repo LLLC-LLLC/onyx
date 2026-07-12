@@ -115,7 +115,7 @@ By default, output is a lean JSON shape tuned for LLM consumers:
 {"results": [{title, url, source_type, content, updated_at}, ...]}.
 Results contain only documents the LLM judged relevant, ordered by relevance;
 content is the full chunk text of each. Use --raw for the full API response
-(adds per-result citation_id).
+(adds per-result citation_id plus stable document and section IDs).
 
 When stdout is not a TTY, output is truncated to --max-output bytes and the
 full response is saved to a temp file.`,
@@ -209,7 +209,7 @@ full response is saved to a temp file.`,
 	cmd.Flags().StringVar(&searchSources, "source", "", "Filter by source type (comma-separated: slack,google_drive)")
 	cmd.Flags().IntVar(&searchDays, "days", 0, "Only return results from the last N days")
 	cmd.Flags().IntVar(&searchAgentID, "agent-id", 0, "Agent ID for scoped search")
-	cmd.Flags().BoolVar(&searchRaw, "raw", false, "Output full API response (adds per-result citation_id)")
+	cmd.Flags().BoolVar(&searchRaw, "raw", false, "Output full API response (includes citation and stable document/section IDs)")
 	cmd.Flags().BoolVar(&searchNoQueryExpansion, "no-query-expansion", false, "Skip LLM query expansion (faster, less comprehensive)")
 	cmd.Flags().IntVar(&maxOutput, "max-output", defaultMaxOutputBytes,
 		"Max bytes to print before truncating (0 to disable, auto-enabled for non-TTY, ignored with --raw)")

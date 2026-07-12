@@ -34,7 +34,7 @@ func TestSearch_Success(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"results": [{"citation_id": 1, "title": "Test", "content": "full chunk text", "link": null, "source_type": "web", "updated_at": null}]
+			"results": [{"citation_id": 1, "document_id": "document-123", "section_start_chunk_id": 7, "section_end_chunk_id": 11, "title": "Test", "content": "full chunk text", "link": null, "source_type": "web", "updated_at": null}]
 		}`))
 	}))
 	defer srv.Close()
@@ -49,6 +49,15 @@ func TestSearch_Success(t *testing.T) {
 	}
 	if resp.Results[0].Content != "full chunk text" {
 		t.Errorf("content = %q, want %q", resp.Results[0].Content, "full chunk text")
+	}
+	if resp.Results[0].DocumentID != "document-123" {
+		t.Errorf("DocumentID = %q, want document-123", resp.Results[0].DocumentID)
+	}
+	if resp.Results[0].SectionStartChunkID != 7 {
+		t.Errorf("SectionStartChunkID = %d, want 7", resp.Results[0].SectionStartChunkID)
+	}
+	if resp.Results[0].SectionEndChunkID != 11 {
+		t.Errorf("SectionEndChunkID = %d, want 11", resp.Results[0].SectionEndChunkID)
 	}
 }
 

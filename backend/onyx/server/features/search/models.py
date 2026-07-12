@@ -39,6 +39,11 @@ class SearchRequest(BaseModel):
 
 class SearchResult(BaseModel):
     citation_id: int | None
+    # These identities are sourced from the final InferenceSection rather than
+    # the LLM-facing display JSON. Internal search sections always carry them.
+    document_id: str
+    section_start_chunk_id: int
+    section_end_chunk_id: int
     title: str
     # Full chunk text the LLM saw for this section. Multiple results may
     # share a citation_id when the LLM selected multiple non-overlapping
