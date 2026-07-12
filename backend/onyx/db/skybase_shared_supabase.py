@@ -19,7 +19,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import cast
 from typing import Final
+from urllib.parse import urlsplit
 
 from sqlalchemy import text
 
@@ -32,6 +34,10 @@ MIGRATOR_ROLE: Final = "skybase_onyx_migrator"
 READONLY_ROLE: Final = "skybase_onyx_kg_ro"
 SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"
 MAX_RUNTIME_CONNECTIONS: Final = 12
+SKYBASE_LLM_PROXY_BASE_URL_ENV: Final = "SKYBASE_LLM_PROXY_BASE_URL"
+SKYBASE_LLM_PROXY_BASE_PATH: Final = "/internal/knowledge/openai/v1"
+SKYBASE_LLM_PROXY_PROVIDER: Final = "openai_compatible"
+SKYBASE_LLM_PROXY_API_KEY_SENTINEL: Final = "skybase-private-proxy"
 ROLE_CONNECTION_LIMITS: Final = {
     RUNTIME_ROLE: MAX_RUNTIME_CONNECTIONS,
     MIGRATOR_ROLE: 1,
@@ -51,19 +57,32 @@ DENIED_WORKER_APPS: Final = frozenset(
     }
 )
 
-# The profile permits only its two database passwords. Everything matching a
+# The profile permits its two database passwords and the exact HMAC signing
+# material for Skybase's private LLM proxy. Everything matching a
 # credential-shaped key or a provider/connector/telemetry namespace is refused
 # before the normal Onyx configuration module can consume it. This remains
 # intentionally broad because connector and provider configuration are owned by
 # Skybase, not by the CE runtime.
 PROFILE_SECRET_ENV_ALLOWLIST: Final = frozenset(
-    {"POSTGRES_PASSWORD", "DB_READONLY_PASSWORD"}
+    {
+        "POSTGRES_PASSWORD",
+        "DB_READONLY_PASSWORD",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY",
+        "SKYBASE_LLM_HMAC_NEXT_KEY",
+    }
 )
 # Hugging Face sets this boolean itself while importing the CE migration
-# dependency graph. It disables telemetry rather than configuring a provider,
-# endpoint, or credential, so rejecting it would make a clean environment
-# fail after import. Keep exceptions named and narrowly scoped.
-PROFILE_NON_SECRET_ENV_ALLOWLIST: Final = frozenset({"HF_HUB_DISABLE_TELEMETRY"})
+# dependency graph. The two key IDs identify the approved private-proxy HMAC
+# values but do not contain signing material. Keep every exception named and
+# narrowly scoped.
+PROFILE_NON_SECRET_ENV_ALLOWLIST: Final = frozenset(
+    {
+        "HF_HUB_DISABLE_TELEMETRY",
+        SKYBASE_LLM_PROXY_BASE_URL_ENV,
+        "SKYBASE_LLM_HMAC_PRIMARY_ID",
+        "SKYBASE_LLM_HMAC_NEXT_ID",
+    }
+)
 FORBIDDEN_SECRET_ENV_TOKENS: Final = frozenset(
     {
         "CREDENTIAL",
@@ -118,6 +137,7 @@ FORBIDDEN_NATIVE_ENV_PREFIXES: Final = (
     "SCIM_",
     "SEGMENT_",
     "SENTRY_",
+    "SKYBASE_LLM_HMAC_",
     "SLACK_",
     "TELEMETRY_",
     "TOGETHER_",
@@ -204,6 +224,130 @@ def _require_present_not_default(env: Mapping[str, str], name: str) -> None:
         )
 
 
+def _configured_nonblank(value: str | None) -> bool:
+    return value is not None and bool(value.strip())
+
+
+def _validate_optional_proxy_pair(
+    env: Mapping[str, str],
+    *,
+    id_name: str,
+    key_name: str,
+) -> bool:
+    identifier = env.get(id_name)
+    key = env.get(key_name)
+    identifier_present = _configured_nonblank(identifier)
+    key_present = _configured_nonblank(key)
+    if (
+        (identifier is not None and not identifier_present)
+        or (key is not None and not key_present)
+        or identifier_present != key_present
+    ):
+        raise SharedSupabaseContractError(
+            f"{id_name} and {key_name} must be an explicit non-empty pair in the shared-Supabase profile."
+        )
+    return identifier_present
+
+
+def get_shared_llm_proxy_base(
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Return the exact deployment-owned base URL for the private LLM proxy."""
+
+    source = os.environ if env is None else env
+    value = source.get(SKYBASE_LLM_PROXY_BASE_URL_ENV)
+    if value is None or not value or value != value.strip():
+        raise SharedSupabaseContractError(
+            f"{SKYBASE_LLM_PROXY_BASE_URL_ENV} must be an exact non-empty private proxy URL."
+        )
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise SharedSupabaseContractError(
+            f"{SKYBASE_LLM_PROXY_BASE_URL_ENV} is not a valid private proxy URL."
+        ) from exc
+
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or not parsed.hostname.endswith(".railway.internal")
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != SKYBASE_LLM_PROXY_BASE_PATH
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise SharedSupabaseContractError(
+            f"{SKYBASE_LLM_PROXY_BASE_URL_ENV} must be the exact private proxy base route."
+        )
+    return value
+
+
+def _validate_shared_llm_proxy_environment(env: Mapping[str, str]) -> None:
+    primary_present = _validate_optional_proxy_pair(
+        env,
+        id_name="SKYBASE_LLM_HMAC_PRIMARY_ID",
+        key_name="SKYBASE_LLM_HMAC_PRIMARY_KEY",
+    )
+    next_present = _validate_optional_proxy_pair(
+        env,
+        id_name="SKYBASE_LLM_HMAC_NEXT_ID",
+        key_name="SKYBASE_LLM_HMAC_NEXT_KEY",
+    )
+    if next_present and not primary_present:
+        raise SharedSupabaseContractError(
+            "SKYBASE_LLM_HMAC_NEXT_ID/KEY require a primary HMAC key pair."
+        )
+    if SKYBASE_LLM_PROXY_BASE_URL_ENV in env:
+        get_shared_llm_proxy_base(env)
+
+
+def assert_shared_llm_provider_configuration(
+    *,
+    provider: str,
+    api_key: str | None,
+    api_base: str | None,
+    api_version: str | None,
+    custom_config: Mapping[str, str] | None,
+    deployment_name: str | None,
+    is_auto_mode: bool,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Reject provider rows that would bypass the shared private-proxy contract."""
+
+    source = os.environ if env is None else env
+    if not is_shared_supabase_profile(source):
+        return
+
+    trusted_base = get_shared_llm_proxy_base(source)
+    if provider != SKYBASE_LLM_PROXY_PROVIDER:
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile permits only the governed openai_compatible LLM provider."
+        )
+    if api_key != SKYBASE_LLM_PROXY_API_KEY_SENTINEL:
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile requires the private-proxy API-key sentinel and never stores upstream provider keys."
+        )
+    if api_base != trusted_base:
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile requires the provider API base to exactly match its deployment-owned private proxy URL."
+        )
+    if custom_config:
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile forbids persisted LLM custom configuration."
+        )
+    if (api_version or "").strip() or (deployment_name or "").strip():
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile forbids LLM API-version and deployment overrides."
+        )
+    if is_auto_mode:
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile forbids automatic LLM provider configuration."
+        )
+
+
 def _assert_no_direct_object_storage(env: Mapping[str, str]) -> None:
     configured = sorted(
         name
@@ -244,8 +388,9 @@ def _assert_no_native_credentials(env: Mapping[str, str]) -> None:
     The runtime necessarily inherits ordinary host variables such as ``PATH`` and
     ``LANG``, so this is a security allowlist for *secret-shaped and native
     service namespaces*, not a brittle allowlist of every POSIX environment
-    variable. The two reviewed database passwords are the only populated
-    credential values accepted by this profile.
+    variable. The reviewed database passwords and narrow private-proxy HMAC
+    signing material are the only populated credential values accepted by this
+    profile.
     """
 
     configured = sorted(
@@ -255,8 +400,9 @@ def _assert_no_native_credentials(env: Mapping[str, str]) -> None:
     )
     if configured:
         raise SharedSupabaseContractError(
-            "The shared-Supabase profile accepts only its reviewed database "
-            "passwords; native provider, connector, identity, storage, and "
+            "The shared-Supabase profile accepts only reviewed database "
+            "passwords and private-proxy HMAC signing material; native provider, "
+            "connector, identity, storage, and "
             f"telemetry inputs are forbidden: {', '.join(configured)}."
         )
 
@@ -321,6 +467,7 @@ def validate_shared_supabase_contract(
     _validate_tls(source)
     _assert_no_direct_object_storage(source)
     _assert_no_native_credentials(source)
+    _validate_shared_llm_proxy_environment(source)
 
     role_profile = (source.get(ROLE_PROFILE_ENV) or "runtime").strip()
     if role_profile not in {"runtime", "migrator"}:
@@ -410,7 +557,7 @@ def _row_mapping(row: object, *, context: str) -> Mapping[str, Any]:
         raise SharedSupabaseContractError(
             f"Shared-profile precondition returned an invalid {context} row."
         )
-    return candidate
+    return cast(Mapping[str, Any], candidate)
 
 
 def _assert_role_security_attributes(execute: Any, role: str, connlimit: int) -> None:

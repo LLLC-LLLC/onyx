@@ -29,6 +29,9 @@ from onyx.llm.models import ANTHROPIC_ADAPTIVE_REASONING_EFFORT
 from onyx.llm.models import ANTHROPIC_REASONING_EFFORT_BUDGET
 from onyx.llm.models import OPENAI_REASONING_EFFORT
 from onyx.llm.request_context import get_llm_mock_response
+from onyx.llm.skybase_llm_proxy import build_skybase_proxy_openai_client
+from onyx.llm.skybase_llm_proxy import resolve_skybase_llm_proxy_config
+from onyx.llm.skybase_llm_proxy import SkybaseLlmProxyConfigurationError
 from onyx.llm.utils import build_litellm_passthrough_kwargs
 from onyx.llm.utils import is_true_openai_model
 from onyx.llm.utils import model_is_reasoning_model
@@ -67,6 +70,7 @@ _env_lock = threading.Lock()
 if TYPE_CHECKING:
     from litellm import CustomStreamWrapper
     from litellm import HTTPHandler
+    from openai import OpenAI
 
 
 _LLM_PROMPT_LONG_TERM_LOG_CATEGORY = "llm_prompt"
@@ -423,6 +427,24 @@ class LitellmLLM(LLM):
                 self._api_base = base if base.endswith("/v1") else f"{base}/v1"
                 model_kwargs["api_base"] = self._api_base
 
+        self._skybase_proxy_config = resolve_skybase_llm_proxy_config(
+            model_provider=model_provider,
+            api_base=self._api_base,
+            api_key=self._api_key,
+        )
+        if self._skybase_proxy_config is not None and (
+            custom_config
+            or extra_headers
+            or extra_body
+            or api_version
+            or deployment_name
+            or custom_llm_provider
+            or set(model_kwargs) != {"api_base"}
+        ):
+            raise SkybaseLlmProxyConfigurationError(
+                "Skybase LLM proxy does not accept persisted configuration, request overrides, or model kwargs."
+            )
+
         # This is needed for Ollama to do proper function calling
         if model_provider == LlmProviderNames.OLLAMA_CHAT and api_base is not None:
             model_kwargs["api_base"] = api_base
@@ -499,7 +521,7 @@ class LitellmLLM(LLM):
         timeout_override: int | None = None,
         max_tokens: int | None = None,
         user_identity: LLMUserIdentity | None = None,
-        client: "HTTPHandler | None" = None,
+        client: "HTTPHandler | OpenAI | None" = None,
     ) -> Union["ModelResponse", "CustomStreamWrapper"]:
         # Lazy loading to avoid memory bloat for non-inference flows
         from litellm.exceptions import RateLimitError
@@ -848,11 +870,38 @@ class LitellmLLM(LLM):
         # This note may not be entirely accurate as there is a lot of complexity in the LiteLLM codebase around this
         # and not every model path was traced thoroughly. It is also possible that in future versions of LiteLLM
         # they will realize that their OpenAI handling is not threadsafe. Hope they will just fix it.
-        client = None
-        if is_true_openai_model(self.config.model_provider, self.config.model_name):
+        client: "HTTPHandler | OpenAI | None" = None
+        if self._skybase_proxy_config is not None:
+            client = build_skybase_proxy_openai_client(
+                self._skybase_proxy_config,
+                timeout=timeout_override or self._timeout or LLM_SOCKET_READ_TIMEOUT,
+            )
+        elif is_true_openai_model(self.config.model_provider, self.config.model_name):
             client = HTTPHandler(timeout=timeout_override or self._timeout)
 
         try:
+            if self._skybase_proxy_config is not None:
+                response = cast(
+                    LiteLLMModelResponse,
+                    self._completion(
+                        prompt=prompt,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        stream=False,
+                        structured_response_format=structured_response_format,
+                        timeout_override=timeout_override,
+                        max_tokens=max_tokens,
+                        parallel_tool_calls=True,
+                        reasoning_effort=reasoning_effort,
+                        user_identity=user_identity,
+                        client=client,
+                    ),
+                )
+                model_response = from_litellm_model_response(response)
+                if model_response.usage:
+                    self._track_llm_cost(model_response.usage)
+                return model_response
+
             # When custom_config is set, env vars are temporarily injected
             # under a global lock. Using stream=True here means the lock is
             # only held during connection setup (not the full inference).
@@ -905,6 +954,11 @@ class LitellmLLM(LLM):
         reasoning_effort: ReasoningEffort = ReasoningEffort.AUTO,
         user_identity: LLMUserIdentity | None = None,
     ) -> Iterator[ModelResponseStream]:
+        if self._skybase_proxy_config is not None:
+            raise SkybaseLlmProxyConfigurationError(
+                "Skybase LLM proxy supports non-streaming chat completions only."
+            )
+
         from litellm import CustomStreamWrapper as LiteLLMCustomStreamWrapper
         from litellm import HTTPHandler
         from litellm.exceptions import APIConnectionError as LiteLLMAPIConnectionError
