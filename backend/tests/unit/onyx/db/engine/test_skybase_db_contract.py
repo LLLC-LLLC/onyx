@@ -13,11 +13,15 @@ import pytest
 
 from onyx.db.skybase_shared_supabase import assert_pool_request
 from onyx.db.skybase_shared_supabase import assert_search_path
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
 from onyx.db.skybase_shared_supabase import is_disabled_native_surface
 from onyx.db.skybase_shared_supabase import SEARCH_PATH
 from onyx.db.skybase_shared_supabase import SharedSupabaseContractError
 from onyx.db.skybase_shared_supabase import validate_shared_supabase_contract
+from onyx.file_store.file_store import DisabledFileStore
+from onyx.file_store.file_store import get_default_file_store
+from onyx.file_store.file_store import get_s3_file_store
 
 
 def _profile_env(tmp_path: Path, *, role_profile: str = "runtime") -> dict[str, str]:
@@ -110,6 +114,89 @@ def test_search_path_and_native_surface_gates(tmp_path: Path) -> None:
         assert is_disabled_native_surface("/api/documents/search")
         assert is_disabled_native_surface("/api/chat/send")
         assert not is_disabled_native_surface("/health")
+
+
+def test_shared_profile_fail_closes_all_file_store_operations(tmp_path: Path) -> None:
+    with patch.dict(os.environ, _profile_env(tmp_path), clear=True):
+        file_store = get_default_file_store()
+        assert isinstance(file_store, DisabledFileStore)
+        file_store.initialize()
+        with pytest.raises(SharedSupabaseContractError, match="FileStore object operations"):
+            file_store.list_files_by_prefix("knowledge/")
+        with pytest.raises(SharedSupabaseContractError, match="Direct S3"):
+            get_s3_file_store()
+
+
+class _Result:
+    def __init__(self, row: tuple[str] | None = None, scalar_value: str | None = None):
+        self._row = row
+        self._scalar_value = scalar_value
+
+    def fetchone(self) -> tuple[str] | None:
+        return self._row
+
+    def scalar(self) -> str | None:
+        return self._scalar_value
+
+
+class _PreconditionBind:
+    def __init__(
+        self,
+        *,
+        extension_schemas: dict[str, str] | None = None,
+        roles: set[str] | None = None,
+        search_path: str = SEARCH_PATH,
+    ) -> None:
+        self.extension_schemas = extension_schemas or {
+            "pg_trgm": "extensions",
+            "pgcrypto": "public",
+        }
+        self.roles = roles or {
+            "skybase_onyx_runtime",
+            "skybase_onyx_migrator",
+            "skybase_onyx_kg_ro",
+        }
+        self.search_path = search_path
+
+    def execute(self, statement: object, parameters: dict[str, str] | None = None) -> _Result:
+        query = str(statement)
+        if "pg_catalog.pg_extension" in query:
+            extension = (parameters or {})["extension_name"]
+            schema = self.extension_schemas.get(extension)
+            return _Result((schema,) if schema is not None else None)
+        if "pg_catalog.pg_roles" in query:
+            role = (parameters or {})["role"]
+            return _Result((role,) if role in self.roles else None)
+        if "SHOW search_path" in query:
+            return _Result(scalar_value=self.search_path)
+        raise AssertionError(f"unexpected precondition query: {query}")
+
+
+@pytest.mark.parametrize(
+    ("bind", "message"),
+    [
+        (
+            _PreconditionBind(extension_schemas={"pg_trgm": "public", "pgcrypto": "public"}),
+            "pg_trgm",
+        ),
+        (
+            _PreconditionBind(roles={"skybase_onyx_runtime", "skybase_onyx_migrator"}),
+            "skybase_onyx_kg_ro",
+        ),
+        (_PreconditionBind(search_path="public"), "search_path"),
+    ],
+)
+def test_migration_preconditions_reject_catalog_drift(
+    tmp_path: Path, bind: _PreconditionBind, message: str
+) -> None:
+    with patch.dict(os.environ, _profile_env(tmp_path, role_profile="migrator"), clear=True):
+        with pytest.raises(SharedSupabaseContractError, match=message):
+            assert_shared_migration_preconditions(bind)
+
+
+def test_migration_preconditions_accept_the_reviewed_catalog(tmp_path: Path) -> None:
+    with patch.dict(os.environ, _profile_env(tmp_path, role_profile="migrator"), clear=True):
+        assert_shared_migration_preconditions(_PreconditionBind())
 
 
 def _run_shared_profile_python(

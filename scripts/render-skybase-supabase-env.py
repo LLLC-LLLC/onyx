@@ -189,9 +189,11 @@ BEGIN
         CREATE ROLE skybase_onyx_kg_ro LOGIN PASSWORD '__READONLY_PASSWORD__';
     END IF;
 END $$;
+ALTER ROLE skybase_onyx_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 1;
+ALTER ROLE skybase_onyx_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 12;
+ALTER ROLE skybase_onyx_kg_ro LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 1;
 CREATE SCHEMA IF NOT EXISTS skybase_onyx AUTHORIZATION skybase_onyx_migrator;
 GRANT USAGE ON SCHEMA extensions TO skybase_onyx_migrator, skybase_onyx_runtime, skybase_onyx_kg_ro;
-GRANT USAGE ON SCHEMA public TO skybase_onyx_migrator, skybase_onyx_runtime;
 GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO skybase_onyx_migrator, skybase_onyx_runtime;
 """
     return (

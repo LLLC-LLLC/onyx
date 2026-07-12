@@ -69,6 +69,24 @@ def test_renderer_emits_private_role_files_without_stdout_secrets(
     assert "IN SCHEMA skybase_onyx" in (
         output_dir / "post-migrate-grants.sql"
     ).read_text(encoding="utf-8")
+    bootstrap_sql = (output_dir / "bootstrap.sql").read_text(encoding="utf-8")
+    assert (
+        "skybase_onyx_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOREPLICATION CONNECTION LIMIT 1" in bootstrap_sql
+    )
+    assert (
+        "skybase_onyx_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOREPLICATION CONNECTION LIMIT 12" in bootstrap_sql
+    )
+    assert (
+        "skybase_onyx_kg_ro LOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+        "NOCREATEROLE NOREPLICATION CONNECTION LIMIT 1" in bootstrap_sql
+    )
+    assert "GRANT USAGE ON SCHEMA public" not in bootstrap_sql
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO "
+        "skybase_onyx_migrator, skybase_onyx_runtime" in bootstrap_sql
+    )
     passwords = re.findall(r"(?:POSTGRES|DB_READONLY)_PASSWORD=([0-9a-f]+)", runtime)
     assert passwords and all(
         re.fullmatch(r"[0-9a-f]{64}", value) for value in passwords

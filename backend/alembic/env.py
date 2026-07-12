@@ -9,6 +9,7 @@ from onyx.configs.app_configs import AWS_REGION_NAME
 from onyx.db.engine.sql_engine import build_connection_string
 from onyx.db.engine.tenant_utils import get_all_tenant_ids
 from onyx.db.skybase_shared_supabase import assert_search_path
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.db.skybase_shared_supabase import SEARCH_PATH
 from onyx.db.skybase_shared_supabase import SHARED_SCHEMA
@@ -232,6 +233,7 @@ def do_run_migrations(
         connection.execute(text(f'SET search_path TO "{SHARED_SCHEMA}", extensions'))
         current_path = connection.execute(text("SHOW search_path")).scalar()
         assert_search_path(str(current_path) if current_path is not None else None)
+        assert_shared_migration_preconditions(connection)
     elif create_schema:
         connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
         connection.execute(text(f'SET search_path TO "{schema_name}"'))
@@ -544,6 +546,7 @@ def run_migrations_online() -> None:
                 assert_search_path(
                     str(current_path) if current_path is not None else None
                 )
+                assert_shared_migration_preconditions(connection)
             else:
                 connection.execute(text(f'SET search_path TO "{schema_name}"'))
 

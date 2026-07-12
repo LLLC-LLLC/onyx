@@ -54,6 +54,7 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/main.py"
     "backend/onyx/setup.py"
     "backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py"
+    "backend/tests/unit/alembic/test_skybase_shared_supabase_alembic_contract.py"
     "backend/tests/unit/scripts/test_skybase_supabase_scripts.py"
 )
 readonly COPIED_SOURCE_ROOTS=(
@@ -330,6 +331,7 @@ readonly CONTRACT_FILE="${REPO_ROOT}/backend/onyx/db/skybase_shared_supabase.py"
 readonly SYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/sql_engine.py"
 readonly ASYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/async_sql_engine.py"
 readonly WARMUP_FILE="${REPO_ROOT}/backend/onyx/db/engine/connection_warmup.py"
+readonly ALEMBIC_ENV_FILE="${REPO_ROOT}/backend/alembic/env.py"
 for contract_line in \
     'SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"' \
     'MAX_RUNTIME_CONNECTIONS: Final = 12' \
@@ -345,6 +347,8 @@ for engine_file in "${SYNC_ENGINE_FILE}" "${ASYNC_ENGINE_FILE}"; do
 done
 grep -Fq -- 'Connection warmup is disabled in the shared-Supabase profile.' "${WARMUP_FILE}" || \
     fail "shared profile must disable legacy connection warmup"
+[[ "$(grep -Fc -- 'assert_shared_migration_preconditions(connection)' "${ALEMBIC_ENV_FILE}")" == "2" ]] || \
+    fail "shared-profile Alembic paths must assert the reviewed catalog twice"
 
 for denied_worker in primary light heavy user_file_processing scheduled_tasks monitoring beat client; do
     grep -Fq -- "assert_worker_app_allowed(\"${denied_worker}\")" \
@@ -363,6 +367,9 @@ grep -Fq -- '# file-under-test: backend/onyx/db/skybase_shared_supabase.py' \
 grep -Fq -- '# file-under-test: scripts/render-skybase-supabase-env.py' \
     "${REPO_ROOT}/backend/tests/unit/scripts/test_skybase_supabase_scripts.py" || \
     fail "renderer test must name its file under test"
+grep -Fq -- '# file-under-test: backend/alembic/env.py' \
+    "${REPO_ROOT}/backend/tests/unit/alembic/test_skybase_shared_supabase_alembic_contract.py" || \
+    fail "Alembic contract test must name its file under test"
 
 renderer_pyc="$(mktemp "${TMPDIR:-/tmp}/skybase-renderer.XXXXXX.pyc")"
 trap 'rm -f "${renderer_pyc}"' EXIT
