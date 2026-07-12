@@ -23,6 +23,7 @@ _DISABLED_BODY = (
     b'Skybase shared-Supabase profile."}'
 )
 _ALLOWED_HEALTH_PATHS = frozenset({"/health", "/health/"})
+_ALLOWED_HEALTH_RAW_PATHS = frozenset({b"/health", b"/health/"})
 
 
 async def _send_json(send: Send, *, status: int, body: bytes) -> None:
@@ -65,7 +66,14 @@ async def shared_supabase_health_app(
         await send({"type": "websocket.close", "code": 1008})
         return
     if scope["type"] == "http":
-        if scope["method"] != "GET" or scope["path"] not in _ALLOWED_HEALTH_PATHS:
+        raw_path = scope.get("raw_path")
+        query_string = scope.get("query_string", b"")
+        if (
+            scope["method"] != "GET"
+            or scope["path"] not in _ALLOWED_HEALTH_PATHS
+            or raw_path not in _ALLOWED_HEALTH_RAW_PATHS
+            or query_string != b""
+        ):
             await _send_json(send, status=503, body=_DISABLED_BODY)
         else:
             await _send_json(send, status=200, body=_HEALTH_BODY)

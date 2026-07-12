@@ -406,7 +406,10 @@ for health_line in \
     'validate_shared_supabase_contract()' \
     '"type": "websocket.close", "code": 1008' \
     '_ALLOWED_HEALTH_PATHS = frozenset({"/health", "/health/"})' \
-    'scope["path"] not in _ALLOWED_HEALTH_PATHS'; do
+    '_ALLOWED_HEALTH_RAW_PATHS = frozenset({b"/health", b"/health/"})' \
+    'scope["path"] not in _ALLOWED_HEALTH_PATHS' \
+    'raw_path not in _ALLOWED_HEALTH_RAW_PATHS' \
+    'query_string != b""'; do
     grep -Fq -- "${health_line}" "${HEALTH_APP_FILE}" || \
         fail "shared health entrypoint is missing: ${health_line}"
 done

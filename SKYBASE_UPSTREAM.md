@@ -106,9 +106,10 @@ later task may expand the allowlist only through a reviewed contract update.
   externally reachable observability surface.
 - Native credential, connector, identity, upload, chat, tenant, skill, tool,
   and MCP surfaces are disabled. The shared-profile ASGI boundary is
-  default-deny: `onyx.shared_supabase_health:app` serves only literal `GET
+  default-deny: `onyx.shared_supabase_health:app` serves only literal raw `GET
   /health` or `GET /health/` in v1 and closes every WebSocket without
-  accepting it. Skybase remains the owner
+  accepting it. Percent-encoded aliases and query strings are rejected. Skybase
+  remains the owner
   of provider credentials, connector configuration, identity, authorization,
   audit, public API, and action execution.
 
