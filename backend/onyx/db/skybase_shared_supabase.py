@@ -59,6 +59,11 @@ DENIED_WORKER_APPS: Final = frozenset(
 PROFILE_SECRET_ENV_ALLOWLIST: Final = frozenset(
     {"POSTGRES_PASSWORD", "DB_READONLY_PASSWORD"}
 )
+# Hugging Face sets this boolean itself while importing the CE migration
+# dependency graph. It disables telemetry rather than configuring a provider,
+# endpoint, or credential, so rejecting it would make a clean environment
+# fail after import. Keep exceptions named and narrowly scoped.
+PROFILE_NON_SECRET_ENV_ALLOWLIST: Final = frozenset({"HF_HUB_DISABLE_TELEMETRY"})
 FORBIDDEN_SECRET_ENV_TOKENS: Final = frozenset(
     {
         "CREDENTIAL",
@@ -217,7 +222,7 @@ def _is_forbidden_native_environment_name(name: str) -> bool:
     """Return whether a populated variable could configure a native secret surface."""
 
     normalized = name.upper()
-    if normalized in PROFILE_SECRET_ENV_ALLOWLIST:
+    if normalized in (PROFILE_SECRET_ENV_ALLOWLIST | PROFILE_NON_SECRET_ENV_ALLOWLIST):
         return False
     tokens = frozenset(normalized.split("_"))
     return (

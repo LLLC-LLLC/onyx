@@ -64,6 +64,14 @@ def test_valid_runtime_profile_passes(tmp_path: Path) -> None:
     validate_shared_supabase_contract(_profile_env(tmp_path))
 
 
+def test_runtime_profile_allows_the_safe_huggingface_telemetry_disable_flag(
+    tmp_path: Path,
+) -> None:
+    environment = _profile_env(tmp_path)
+    environment["HF_HUB_DISABLE_TELEMETRY"] = "true"
+    validate_shared_supabase_contract(environment)
+
+
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [

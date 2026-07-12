@@ -1,3 +1,13 @@
+from onyx.db.skybase_shared_supabase import is_disabled_native_surface
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
+from onyx.db.skybase_shared_supabase import SharedSupabaseContractError
+
+if is_shared_supabase_profile():
+    raise SharedSupabaseContractError(
+        "The shared-Supabase profile must start "
+        "onyx.shared_supabase_health:app, not onyx.main:app."
+    )
+
 import logging
 import sys
 import traceback
@@ -66,8 +76,6 @@ from onyx.db.engine.async_sql_engine import reset_sqlalchemy_async_engine
 from onyx.db.engine.connection_warmup import warm_up_connections
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.engine.sql_engine import SqlEngine
-from onyx.db.skybase_shared_supabase import is_disabled_native_surface
-from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.error_handling.exceptions import register_onyx_exception_handlers
 from onyx.file_store.file_store import get_default_file_store
 from onyx.hooks.registry import validate_registry

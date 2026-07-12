@@ -66,19 +66,24 @@ expected_head="$(cd "${REPO_ROOT}/backend" && run_with_skybase_ce_private_env al
   exit 65
 }
 
-export PGDATABASE="${POSTGRES_DB}"
-export PGHOST="${POSTGRES_HOST}"
-export PGPASSWORD="${POSTGRES_PASSWORD}"
-export PGPORT="${POSTGRES_PORT}"
-export PGSSLMODE="${POSTGRES_SSLMODE}"
-export PGSSLROOTCERT="${POSTGRES_SSLROOTCERT}"
-export PGUSER="${POSTGRES_USER}"
-actual_head="$(psql --no-psqlrc --tuples-only --no-align --quiet --set=ON_ERROR_STOP=1 \
+run_reviewed_psql() {
+  run_with_skybase_ce_private_env env \
+    "PGDATABASE=${POSTGRES_DB}" \
+    "PGHOST=${POSTGRES_HOST}" \
+    "PGPASSWORD=${POSTGRES_PASSWORD}" \
+    "PGPORT=${POSTGRES_PORT}" \
+    "PGSSLMODE=${POSTGRES_SSLMODE}" \
+    "PGSSLROOTCERT=${POSTGRES_SSLROOTCERT}" \
+    "PGUSER=${POSTGRES_USER}" \
+    psql "$@"
+}
+
+actual_head="$(run_reviewed_psql --no-psqlrc --tuples-only --no-align --quiet --set=ON_ERROR_STOP=1 \
   --command='SELECT version_num FROM skybase_onyx.alembic_version')"
 [[ "${actual_head}" == "${expected_head}" ]] || {
   printf 'post-migration grants require a successful upgrade to Alembic head\n' >&2
   exit 65
 }
 
-psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file="${GRANTS_FILE}" >/dev/null
+run_reviewed_psql --no-psqlrc --quiet --set=ON_ERROR_STOP=1 --file="${GRANTS_FILE}" >/dev/null
 printf 'Applied reviewed shared-Supabase post-migration grants.\n'

@@ -28,8 +28,10 @@ when the dependency lock changes.
 - `backend/onyx`, `backend/shared_configs`, and the CE Alembic history.
 - The pinned CE backend lock at `backend/requirements/default.txt`, included by
   `backend/requirements/skybase-ce.txt`.
-- A private API image and a minimal worker process definition containing only
-  document fetching and document processing queues.
+- A private health-only API process at `onyx.shared_supabase_health:app` and a
+  minimal worker process definition containing only document fetching and
+  document processing queues. It honors Railway's `PORT` with a local `8080`
+  fallback. The profile must not start `onyx.main`.
 
 ## Explicit Exclusions
 
@@ -56,6 +58,8 @@ permitted.
 - Host-only launch tools: `scripts/render-skybase-supabase-env.py`,
   `scripts/run-skybase-ce-alembic.sh`, and
   `scripts/apply-skybase-ce-post-migration-grants.sh`.
+- The health-only shared-profile entrypoint:
+  `backend/onyx/shared_supabase_health.py`.
 - Shared contract and engine paths: `backend/onyx/db/skybase_shared_supabase.py`,
   `backend/onyx/db/engine/sql_engine.py`,
   `backend/onyx/db/engine/async_sql_engine.py`,
@@ -98,9 +102,10 @@ later task may expand the allowlist only through a reviewed contract update.
   concurrency and database overflow are fixed to one and zero. Other native
   workers fail before `SqlEngine.init_engine()`.
 - Native credential, connector, identity, upload, chat, tenant, skill, tool,
-  and MCP surfaces are disabled. The shared-profile HTTP boundary is
-  default-deny: only `/health` is served in v1. Skybase remains the owner of
-  provider credentials, connector configuration, identity, authorization,
+  and MCP surfaces are disabled. The shared-profile ASGI boundary is
+  default-deny: `onyx.shared_supabase_health:app` serves only `/health` in v1
+  and closes every WebSocket without accepting it. Skybase remains the owner
+  of provider credentials, connector configuration, identity, authorization,
   audit, public API, and action execution.
 
 ## Provider And Database Boundaries
@@ -108,7 +113,9 @@ later task may expand the allowlist only through a reviewed contract update.
 - Onyx receives no provider, connector, identity, storage, or telemetry
   secrets. The profile accepts only the two generated database passwords and
   rejects secret-shaped variables and native service namespaces, including
-  OpenRouter. A later configuration slice must introduce a reviewed Skybase
+  OpenRouter. HF_HUB_DISABLE_TELEMETRY is the sole non-secret library flag
+  allowed because upstream sets it to disable telemetry while loading CE
+  migrations. A later configuration slice must introduce a reviewed Skybase
   proxy contract instead of relaxing this boundary.
 - A later request-transport slice must calculate an exact-body HMAC at the
   LiteLLM HTTP boundary. Private Railway networking alone does not prove that
@@ -121,8 +128,8 @@ later task may expand the allowlist only through a reviewed contract update.
   permission-bearing data. A future retrieval adapter must expose a reviewed,
   permission-filtered view or service before adding a non-empty allowlist.
 - The host launchers parse only the renderer's known `KEY=value` fields and
-  start Alembic under a scrubbed environment. Unrelated desktop or CI secrets
-  are never inherited by the CE migration process.
+  start Alembic and post-migration `psql` under scrubbed environments.
+  Unrelated desktop or CI secrets are never inherited by CE migration tools.
 
 ## Update Procedure
 

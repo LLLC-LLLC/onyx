@@ -54,10 +54,13 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/kg/clustering/clustering.py"
     "backend/onyx/kg/clustering/normalizations.py"
     "backend/onyx/main.py"
+    "backend/onyx/shared_supabase_health.py"
     "backend/onyx/setup.py"
     "backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py"
+    "backend/tests/unit/onyx/test_shared_supabase_health.py"
     "backend/tests/unit/alembic/test_skybase_shared_supabase_alembic_contract.py"
     "backend/tests/unit/scripts/test_skybase_supabase_scripts.py"
+    "backend/tests/unit/scripts/test_skybase_post_migration_grants.py"
 )
 readonly COPIED_SOURCE_ROOTS=(
     "backend/alembic"
@@ -271,14 +274,15 @@ for expected_image_line in \
 done
 
 for expected_worker_line in \
+    'exec uvicorn onyx.shared_supabase_health:app --host=0.0.0.0 --port="${PORT:-8080}"' \
     'celery -A onyx.background.celery.versioned_apps.docfetching worker --hostname=skybase-docfetching@%%h --concurrency=1 --pool=threads -Q connector_doc_fetching' \
     'celery -A onyx.background.celery.versioned_apps.docprocessing worker --hostname=skybase-docprocessing@%%h --concurrency=1 --pool=threads -Q docprocessing'; do
     grep -Fq -- "${expected_worker_line}" "${WORKER_FILE}" || \
         fail "CE worker contract is missing: ${expected_worker_line}"
 done
 
-[[ "$(grep -c '^\[program:' "${WORKER_FILE}")" == "2" ]] || \
-    fail "shared supervisor may define only docfetching and docprocessing"
+[[ "$(grep -c '^\[program:' "${WORKER_FILE}")" == "3" ]] || \
+    fail "shared supervisor may define only the health API and approved workers"
 
 readonly SHARED_MIGRATIONS=(
     "backend/alembic/versions/c9e2cd766c29_add_s3_file_store_table.py"
@@ -338,6 +342,7 @@ readonly RENDERER_FILE="${REPO_ROOT}/scripts/render-skybase-supabase-env.py"
 readonly MIGRATION_LAUNCHER_FILE="${REPO_ROOT}/scripts/run-skybase-ce-alembic.sh"
 readonly GRANTS_LAUNCHER_FILE="${REPO_ROOT}/scripts/apply-skybase-ce-post-migration-grants.sh"
 readonly PRIVATE_ENV_LIB_FILE="${REPO_ROOT}/scripts/_lib/skybase-ce-private-env.sh"
+readonly HEALTH_APP_FILE="${REPO_ROOT}/backend/onyx/shared_supabase_health.py"
 for contract_line in \
     'SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"' \
     'MAX_RUNTIME_CONNECTIONS: Final = 12' \
@@ -347,6 +352,7 @@ for contract_line in \
     'rolbypassrls' \
     'pg_catalog.pg_auth_members' \
     'has_table_privilege' \
+    'PROFILE_NON_SECRET_ENV_ALLOWLIST: Final = frozenset({"HF_HUB_DISABLE_TELEMETRY"})' \
     'SHARED_PROFILE_ALLOWED_PATHS: Final = frozenset({"/health"})' \
     'The shared-Supabase profile accepts only its reviewed database'; do
     grep -Fq -- "${contract_line}" "${CONTRACT_FILE}" || \
@@ -376,12 +382,32 @@ grep -Fq -- 'EXPECTED_GRANTS_SHA256=' "${GRANTS_LAUNCHER_FILE}" || \
     fail "post-migration grants launcher must pin reviewed SQL"
 grep -Fq -- 'SELECT version_num FROM skybase_onyx.alembic_version' "${GRANTS_LAUNCHER_FILE}" || \
     fail "post-migration grants launcher must verify Alembic head"
+grep -Fq -- 'run_reviewed_psql()' "${GRANTS_LAUNCHER_FILE}" || \
+    fail "post-migration grants launcher must use the reviewed psql boundary"
+grep -Fq -- 'run_with_skybase_ce_private_env env' "${GRANTS_LAUNCHER_FILE}" || \
+    fail "post-migration psql must run in a scrubbed environment"
+if grep -nE -- '^export PG' "${GRANTS_LAUNCHER_FILE}"; then
+    fail "post-migration grants launcher must not export inherited PG settings"
+fi
 for launcher_file in "${MIGRATION_LAUNCHER_FILE}" "${GRANTS_LAUNCHER_FILE}"; do
     grep -Fq -- 'load_skybase_ce_private_env' "${launcher_file}" || \
         fail "launcher must parse private env without sourcing it: ${launcher_file}"
     grep -Fq -- 'run_with_skybase_ce_private_env' "${launcher_file}" || \
         fail "launcher must scrub inherited environment values: ${launcher_file}"
 done
+
+require_file "${HEALTH_APP_FILE}"
+for health_line in \
+    'is_shared_supabase_profile()' \
+    'validate_shared_supabase_contract()' \
+    '"type": "websocket.close", "code": 1008' \
+    'is_disabled_native_surface(scope["path"])'; do
+    grep -Fq -- "${health_line}" "${HEALTH_APP_FILE}" || \
+        fail "shared health entrypoint is missing: ${health_line}"
+done
+grep -Fq -- 'onyx.shared_supabase_health:app, not onyx.main:app.' \
+    "${REPO_ROOT}/backend/onyx/main.py" || \
+    fail "native main must reject the shared-Supabase profile before router imports"
 
 for denied_worker in primary light heavy user_file_processing scheduled_tasks monitoring beat client; do
     grep -Fq -- "assert_worker_app_allowed(\"${denied_worker}\")" \
@@ -403,6 +429,12 @@ grep -Fq -- '# file-under-test: scripts/render-skybase-supabase-env.py' \
 grep -Fq -- '# file-under-test: backend/alembic/env.py' \
     "${REPO_ROOT}/backend/tests/unit/alembic/test_skybase_shared_supabase_alembic_contract.py" || \
     fail "Alembic contract test must name its file under test"
+grep -Fq -- '# file-under-test: backend/onyx/shared_supabase_health.py' \
+    "${REPO_ROOT}/backend/tests/unit/onyx/test_shared_supabase_health.py" || \
+    fail "health entrypoint test must name its file under test"
+grep -Fq -- '# file-under-test: scripts/apply-skybase-ce-post-migration-grants.sh' \
+    "${REPO_ROOT}/backend/tests/unit/scripts/test_skybase_post_migration_grants.py" || \
+    fail "post-migration grants test must name its file under test"
 
 renderer_pyc="$(mktemp "${TMPDIR:-/tmp}/skybase-renderer.XXXXXX.pyc")"
 trap 'rm -f "${renderer_pyc}"' EXIT
