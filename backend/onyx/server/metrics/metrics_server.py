@@ -14,6 +14,7 @@ import threading
 
 from prometheus_client import start_http_server
 
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -51,6 +52,13 @@ def start_metrics_server(worker_type: str) -> int | None:
     global _server_started
 
     with _server_lock:
+        if is_shared_supabase_profile():
+            logger.info(
+                "Prometheus metrics server disabled by the Skybase shared-Supabase profile for %s",
+                worker_type,
+            )
+            return None
+
         if _server_started:
             logger.debug("Metrics server already started for %s", worker_type)
             return None

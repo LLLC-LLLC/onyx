@@ -101,6 +101,9 @@ later task may expand the allowlist only through a reviewed contract update.
 - Only the docfetching and docprocessing Celery apps are launchable; their
   concurrency and database overflow are fixed to one and zero. Other native
   workers fail before `SqlEngine.init_engine()`.
+- The shared profile suppresses every standalone worker Prometheus HTTP server,
+  even when its environment requests a metrics port. Skybase owns any
+  externally reachable observability surface.
 - Native credential, connector, identity, upload, chat, tenant, skill, tool,
   and MCP surfaces are disabled. The shared-profile ASGI boundary is
   default-deny: `onyx.shared_supabase_health:app` serves only literal `GET

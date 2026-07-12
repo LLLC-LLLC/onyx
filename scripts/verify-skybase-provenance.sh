@@ -54,10 +54,12 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/kg/clustering/clustering.py"
     "backend/onyx/kg/clustering/normalizations.py"
     "backend/onyx/main.py"
+    "backend/onyx/server/metrics/metrics_server.py"
     "backend/onyx/shared_supabase_health.py"
     "backend/onyx/setup.py"
     "backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py"
     "backend/tests/unit/onyx/test_shared_supabase_health.py"
+    "backend/tests/unit/server/metrics/test_metrics_server.py"
     "backend/tests/unit/alembic/test_skybase_shared_supabase_alembic_contract.py"
     "backend/tests/unit/scripts/test_skybase_supabase_scripts.py"
     "backend/tests/unit/scripts/test_skybase_post_migration_grants.py"
@@ -343,6 +345,7 @@ readonly MIGRATION_LAUNCHER_FILE="${REPO_ROOT}/scripts/run-skybase-ce-alembic.sh
 readonly GRANTS_LAUNCHER_FILE="${REPO_ROOT}/scripts/apply-skybase-ce-post-migration-grants.sh"
 readonly PRIVATE_ENV_LIB_FILE="${REPO_ROOT}/scripts/_lib/skybase-ce-private-env.sh"
 readonly HEALTH_APP_FILE="${REPO_ROOT}/backend/onyx/shared_supabase_health.py"
+readonly METRICS_SERVER_FILE="${REPO_ROOT}/backend/onyx/server/metrics/metrics_server.py"
 for contract_line in \
     'SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"' \
     'MAX_RUNTIME_CONNECTIONS: Final = 12' \
@@ -397,6 +400,7 @@ for launcher_file in "${MIGRATION_LAUNCHER_FILE}" "${GRANTS_LAUNCHER_FILE}"; do
 done
 
 require_file "${HEALTH_APP_FILE}"
+require_file "${METRICS_SERVER_FILE}"
 for health_line in \
     'is_shared_supabase_profile()' \
     'validate_shared_supabase_contract()' \
@@ -409,6 +413,8 @@ done
 grep -Fq -- 'onyx.shared_supabase_health:app, not onyx.main:app.' \
     "${REPO_ROOT}/backend/onyx/main.py" || \
     fail "native main must reject the shared-Supabase profile before router imports"
+grep -Fq -- 'if is_shared_supabase_profile():' "${METRICS_SERVER_FILE}" || \
+    fail "shared profile must disable standalone worker metrics servers"
 
 for denied_worker in primary light heavy user_file_processing scheduled_tasks monitoring beat client; do
     grep -Fq -- "assert_worker_app_allowed(\"${denied_worker}\")" \
