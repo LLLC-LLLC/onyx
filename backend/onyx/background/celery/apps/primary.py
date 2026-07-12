@@ -30,6 +30,7 @@ from onyx.db.engine.sql_engine import SqlEngine
 from onyx.db.index_attempt import get_index_attempt
 from onyx.db.index_attempt import mark_attempt_canceled
 from onyx.db.indexing_coordination import IndexingCoordination
+from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
 from onyx.redis.redis_connector_delete import RedisConnectorDelete
 from onyx.redis.redis_connector_doc_perm_sync import RedisConnectorPermissionSync
 from onyx.redis.redis_connector_ext_group_sync import RedisConnectorExternalGroupSync
@@ -47,6 +48,8 @@ from onyx.server.metrics.metrics_server import start_metrics_server
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
+
+assert_worker_app_allowed("primary")
 
 logger = setup_logger()
 

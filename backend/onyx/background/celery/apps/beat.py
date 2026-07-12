@@ -13,12 +13,15 @@ from onyx.background.celery.tasks.beat_schedule import CLOUD_BEAT_MULTIPLIER_DEF
 from onyx.configs.constants import POSTGRES_CELERY_BEAT_APP_NAME
 from onyx.db.engine.sql_engine import SqlEngine
 from onyx.db.engine.tenant_utils import get_all_tenant_ids
+from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
 from onyx.server.runtime.onyx_runtime import OnyxRuntime
 from onyx.utils.variable_functionality import fetch_versioned_implementation
 from shared_configs.configs import IGNORED_SYNCING_TENANT_LIST
 from shared_configs.configs import MULTI_TENANT
 
 task_logger = get_task_logger(__name__)
+
+assert_worker_app_allowed("beat")
 
 celery_app = Celery(__name__)
 celery_app.config_from_object("onyx.background.celery.configs.beat")

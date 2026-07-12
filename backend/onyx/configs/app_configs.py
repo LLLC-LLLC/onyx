@@ -9,6 +9,9 @@ from onyx.auth.schemas import AuthBackend
 from onyx.cache.interface import CacheBackendType
 from onyx.configs.constants import AuthType
 from onyx.configs.constants import QueryHistoryType
+from onyx.db.skybase_shared_supabase import EXTENSION_SCHEMA
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
+from onyx.db.skybase_shared_supabase import validate_shared_supabase_contract
 from onyx.document_index.opensearch.constants import OpenSearchAuthMethod
 from onyx.file_processing.enums import HtmlBasedConnectorTransformLinksStrategy
 from onyx.prompts.image_analysis import DEFAULT_IMAGE_SUMMARIZATION_SYSTEM_PROMPT
@@ -562,6 +565,10 @@ POSTGRES_PASSWORD = urllib.parse.quote_plus(
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST") or "127.0.0.1"
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT") or "5432"
 POSTGRES_DB = os.environ.get("POSTGRES_DB") or "postgres"
+# Extensions are normally installed in ``public`` upstream.  The shared
+# Skybase profile requires the pre-managed Supabase ``extensions`` schema and
+# validates that explicit operator choice at import time below.
+POSTGRES_EXTENSION_SCHEMA = os.environ.get("POSTGRES_EXTENSION_SCHEMA", "public")
 AWS_REGION_NAME = os.environ.get("AWS_REGION_NAME") or "us-east-2"
 # Comma-separated replica / multi-host list. If unset, defaults to POSTGRES_HOST
 # only.
@@ -1905,3 +1912,15 @@ STRIPE_PUBLISHABLE_KEY_URL = (
 )
 # Override for local testing with Stripe test keys (pk_test_*)
 STRIPE_PUBLISHABLE_KEY_OVERRIDE = os.environ.get("STRIPE_PUBLISHABLE_KEY")
+
+
+# The CE v1 shared-Supabase pilot is an explicit opt-in.  Keep this import-time
+# validation at the end of the module so every dependent setting has been read
+# before a process can initialize a database engine or Celery app.
+if is_shared_supabase_profile():
+    if POSTGRES_EXTENSION_SCHEMA != EXTENSION_SCHEMA:
+        raise ValueError(
+            "POSTGRES_EXTENSION_SCHEMA must be 'extensions' when "
+            "SKYBASE_ONYX_SHARED_SUPABASE=true."
+        )
+    validate_shared_supabase_contract()

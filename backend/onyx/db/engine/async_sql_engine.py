@@ -26,6 +26,10 @@ from onyx.db.engine.sql_engine import build_connection_string
 from onyx.db.engine.sql_engine import is_valid_schema_name
 from onyx.db.engine.sql_engine import SqlEngine
 from onyx.db.engine.sql_engine import USE_IAM_AUTH
+from onyx.db.skybase_shared_supabase import assert_pool_request
+from onyx.db.skybase_shared_supabase import assert_search_path
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
+from onyx.db.skybase_shared_supabase import shared_search_path
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA_STANDARD_VALUE
 from shared_configs.contextvars import get_current_tenant_id
@@ -34,9 +38,40 @@ from shared_configs.contextvars import get_current_tenant_id
 _ASYNC_ENGINE: AsyncEngine | None = None
 
 
+def _install_shared_async_search_path_guard(engine: AsyncEngine) -> None:
+    """Set and verify the path on every asyncpg checkout.
+
+    SQLAlchemy exposes asyncpg's raw connection through ``run_async`` inside
+    sync-engine events.  Keeping this guard at checkout prevents a previous
+    request's raw ``SET search_path`` from leaking through a reused pool slot.
+    """
+
+    if not is_shared_supabase_profile():
+        return
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def _reset_and_assert_path(
+        dbapi_connection: Any,
+        connection_record: Any,  # noqa: ARG001
+        connection_proxy: Any,  # noqa: ARG001
+    ) -> None:
+        async def _apply(raw_connection: Any) -> None:
+            await raw_connection.execute(f"SET search_path TO {shared_search_path()}")
+            current = await raw_connection.fetchval("SHOW search_path")
+            assert_search_path(str(current) if current is not None else None)
+
+        dbapi_connection.run_async(_apply)
+
+
 def get_sqlalchemy_async_engine() -> AsyncEngine:
     global _ASYNC_ENGINE
     if _ASYNC_ENGINE is None:
+        if is_shared_supabase_profile():
+            assert_pool_request(
+                pool_size=POSTGRES_API_SERVER_POOL_SIZE,
+                max_overflow=POSTGRES_API_SERVER_POOL_OVERFLOW,
+                purpose="api_async",
+            )
         app_name = SqlEngine.get_app_name() + "_async"
         connection_string = build_connection_string(
             db_api=ASYNC_DB_API,
@@ -44,8 +79,13 @@ def get_sqlalchemy_async_engine() -> AsyncEngine:
         )
 
         connect_args: dict[str, Any] = {}
+        server_settings: dict[str, str] = {}
         if app_name:
-            connect_args["server_settings"] = {"application_name": app_name}
+            server_settings["application_name"] = app_name
+        if is_shared_supabase_profile():
+            server_settings["search_path"] = shared_search_path()
+        if server_settings:
+            connect_args["server_settings"] = server_settings
 
         connect_args["ssl"] = create_pg_ssl_context()
 
@@ -71,6 +111,7 @@ def get_sqlalchemy_async_engine() -> AsyncEngine:
             connection_string,
             **engine_kwargs,
         )
+        _install_shared_async_search_path_guard(_ASYNC_ENGINE)
 
         if USE_IAM_AUTH:
 

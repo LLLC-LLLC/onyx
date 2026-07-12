@@ -1,3 +1,4 @@
+# file-under-test: backend/onyx/server/metrics/metrics_server.py
 """Tests for the Prometheus metrics server module."""
 
 from collections.abc import Iterator
@@ -39,6 +40,24 @@ class TestStartMetricsServer:
     def test_disabled_via_env_var(self, mock_start: MagicMock) -> None:
         port = start_metrics_server("monitoring")
         assert port is None
+        mock_start.assert_not_called()
+
+    @pytest.mark.parametrize("worker_type", ("docfetching", "docprocessing"))
+    @patch("onyx.server.metrics.metrics_server.start_http_server")
+    @patch.dict(
+        "os.environ",
+        {
+            "SKYBASE_ONYX_SHARED_SUPABASE": "true",
+            "PROMETHEUS_METRICS_ENABLED": "true",
+            "PROMETHEUS_METRICS_PORT": "9999",
+        },
+    )
+    def test_shared_profile_never_starts_document_worker_metrics(
+        self,
+        mock_start: MagicMock,
+        worker_type: str,
+    ) -> None:
+        assert start_metrics_server(worker_type) is None
         mock_start.assert_not_called()
 
     @patch("onyx.server.metrics.metrics_server.start_http_server")

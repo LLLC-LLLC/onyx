@@ -14,10 +14,13 @@ from celery.signals import worker_shutdown
 import onyx.background.celery.apps.app_base as app_base
 from onyx.configs.constants import POSTGRES_CELERY_WORKER_USER_FILE_PROCESSING_APP_NAME
 from onyx.db.engine.sql_engine import SqlEngine
+from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
 
 logger = setup_logger()
+
+assert_worker_app_allowed("user_file_processing")
 
 celery_app = Celery(__name__)
 celery_app.config_from_object("onyx.background.celery.configs.user_file_processing")

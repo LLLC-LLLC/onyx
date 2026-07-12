@@ -29,9 +29,12 @@ LABEL org.opencontainers.image.source="https://github.com/onyx-dot-app/onyx" \
 
 ENV DO_NOT_TRACK="true" \
     ENABLE_PAID_ENTERPRISE_EDITION_FEATURES="false" \
+    FILE_STORE_BACKEND="disabled" \
     LICENSE_ENFORCEMENT_ENABLED="false" \
     ONYX_RUNNING_IN_DOCKER="true" \
-    PYTHONPATH="/app"
+    PYTHONPATH="/app" \
+    SKYBASE_ONYX_SHARED_SUPABASE="true" \
+    SKIP_WARM_UP="true"
 
 RUN groupadd -g 1001 onyx && \
     useradd -u 1001 -g onyx -m -s /bin/bash onyx && \

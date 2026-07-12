@@ -8,6 +8,12 @@ from onyx.configs.app_configs import POSTGRES_USER
 from onyx.configs.app_configs import AWS_REGION_NAME
 from onyx.db.engine.sql_engine import build_connection_string
 from onyx.db.engine.tenant_utils import get_all_tenant_ids
+from onyx.db.skybase_shared_supabase import assert_search_path
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
+from onyx.db.skybase_shared_supabase import SEARCH_PATH
+from onyx.db.skybase_shared_supabase import SHARED_SCHEMA
+from onyx.db.skybase_shared_supabase import validate_shared_supabase_contract
 from sqlalchemy import event
 from sqlalchemy import pool
 from sqlalchemy import text
@@ -192,6 +198,20 @@ def get_schema_options() -> tuple[
             "or provide schemas. Cannot run default migration."
         )
 
+    if is_shared_supabase_profile():
+        validate_shared_supabase_contract()
+        if (
+            create_schema
+            or upgrade_all_tenants
+            or continue_on_error
+            or schemas != [SHARED_SCHEMA]
+        ):
+            raise ValueError(
+                "The shared-Supabase profile only permits `-x create_schema=false "
+                "-x schemas=skybase_onyx upgrade head`; it never creates schemas, "
+                "fans out to tenants, or continues after a migration error."
+            )
+
     return (
         create_schema,
         upgrade_all_tenants,
@@ -205,10 +225,20 @@ def get_schema_options() -> tuple[
 def do_run_migrations(
     connection: Connection, schema_name: str, create_schema: bool
 ) -> None:
-    if create_schema:
+    if is_shared_supabase_profile():
+        if create_schema or schema_name != SHARED_SCHEMA:
+            raise ValueError(
+                "Shared-profile migrations require the pre-created skybase_onyx schema."
+            )
+        connection.execute(text(f'SET search_path TO "{SHARED_SCHEMA}", extensions'))
+        current_path = connection.execute(text("SHOW search_path")).scalar()
+        assert_search_path(str(current_path) if current_path is not None else None)
+        assert_shared_migration_preconditions(connection)
+    elif create_schema:
         connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
-
-    connection.execute(text(f'SET search_path TO "{schema_name}"'))
+        connection.execute(text(f'SET search_path TO "{schema_name}"'))
+    else:
+        connection.execute(text(f'SET search_path TO "{schema_name}"'))
 
     context.configure(
         connection=connection,
@@ -266,13 +296,25 @@ async def run_async_migrations() -> None:
         schemas = [POSTGRES_DEFAULT_SCHEMA]
 
     # without init_engine, subsequent engine calls fail hard intentionally
-    SqlEngine.init_engine(pool_size=20, max_overflow=5)
-
-    engine = create_async_engine(
-        build_connection_string(),
-        poolclass=pool.NullPool,
-        connect_args={"ssl": create_pg_ssl_context()},
-    )
+    if is_shared_supabase_profile():
+        SqlEngine.init_engine(pool_size=1, max_overflow=0, purpose="migrator")
+        engine = create_async_engine(
+            build_connection_string(),
+            pool_size=1,
+            max_overflow=0,
+            pool_pre_ping=True,
+            connect_args={
+                "ssl": create_pg_ssl_context(),
+                "server_settings": {"search_path": SEARCH_PATH},
+            },
+        )
+    else:
+        SqlEngine.init_engine(pool_size=20, max_overflow=5)
+        engine = create_async_engine(
+            build_connection_string(),
+            poolclass=pool.NullPool,
+            connect_args={"ssl": create_pg_ssl_context()},
+        )
 
     if USE_IAM_AUTH:
 
@@ -381,6 +423,11 @@ def run_migrations_offline() -> None:
 
     logger.info("run_migrations_offline starting.")
 
+    if is_shared_supabase_profile():
+        raise ValueError(
+            "Offline Alembic output is not a supported shared-Supabase launch path."
+        )
+
     # without init_engine, subsequent engine calls fail hard intentionally
     SqlEngine.init_engine(pool_size=20, max_overflow=5)
 
@@ -485,8 +532,23 @@ def run_migrations_online() -> None:
 
         # pytest-alembic passes an Engine, we need to get a connection from it
         with connectable.connect() as connection:
-            # Set search path for the schema
-            connection.execute(text(f'SET search_path TO "{schema_name}"'))
+            # Set search path for the schema. Shared-profile test/rehearsal
+            # paths use the same runtime assertion as normal async Alembic.
+            if is_shared_supabase_profile():
+                if schema_name != SHARED_SCHEMA:
+                    raise ValueError(
+                        "Shared-profile pytest Alembic runs must target skybase_onyx."
+                    )
+                connection.execute(
+                    text(f'SET search_path TO "{SHARED_SCHEMA}", extensions')
+                )
+                current_path = connection.execute(text("SHOW search_path")).scalar()
+                assert_search_path(
+                    str(current_path) if current_path is not None else None
+                )
+                assert_shared_migration_preconditions(connection)
+            else:
+                connection.execute(text(f'SET search_path TO "{schema_name}"'))
 
             context.configure(
                 connection=connection,

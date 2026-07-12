@@ -12,6 +12,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
 import logging
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 logger = logging.getLogger("alembic.runtime.migration")
 
@@ -24,6 +25,8 @@ depends_on = None
 
 def upgrade() -> None:
     """Populate new columns with data."""
+
+    assert_shared_migration_preconditions(op.get_bind())
 
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -51,7 +54,7 @@ def upgrade() -> None:
                 result = bind.execute(
                     text("""
                     UPDATE user_file
-                    SET new_id = gen_random_uuid()
+                    SET new_id = public.gen_random_uuid()
                     WHERE new_id IS NULL
                     AND id IN (
                         SELECT id FROM user_file
@@ -335,7 +338,7 @@ def downgrade() -> None:
                 "user_file",
                 "new_id",
                 nullable=True,
-                server_default=sa.text("gen_random_uuid()"),
+                server_default=sa.text("public.gen_random_uuid()"),
             )
             # Optionally clear the data
             # bind.execute(text("UPDATE user_file SET new_id = NULL"))
