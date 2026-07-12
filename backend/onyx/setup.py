@@ -32,6 +32,7 @@ from onyx.db.llm import upsert_llm_provider
 from onyx.db.search_settings import get_active_search_settings
 from onyx.db.search_settings import get_current_search_settings
 from onyx.db.search_settings import update_current_search_settings
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.db.swap_index import check_and_perform_index_swap
 from onyx.document_index.factory import get_all_document_indices
 from onyx.document_index.interfaces_new import DocumentIndex
@@ -234,6 +235,14 @@ def setup_document_indices(
 
 
 def setup_postgres(db_session: Session) -> None:
+    if is_shared_supabase_profile():
+        # Skybase exclusively owns provider credentials and connector records.
+        # Returning before the upstream bootstrap helpers prevents CE from
+        # writing plaintext credential defaults into the shared schema.
+        logger.notice(
+            "Skipping native credential and connector bootstrap in the shared-Supabase profile."
+        )
+        return
     logger.notice("Verifying default connector/credential exist.")
     create_initial_public_credential(db_session)
     create_initial_default_connector(db_session)

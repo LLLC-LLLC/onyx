@@ -33,6 +33,10 @@ from onyx.configs.app_configs import POSTGRES_USER
 from onyx.configs.constants import POSTGRES_UNKNOWN_APP_NAME
 from onyx.db.engine.iam_auth import provide_iam_token
 from onyx.db.engine.pg_ssl import pg_ssl_psycopg2_connect_args
+from onyx.db.skybase_shared_supabase import assert_pool_request
+from onyx.db.skybase_shared_supabase import assert_search_path
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
+from onyx.db.skybase_shared_supabase import shared_search_path
 from onyx.server.utils import BasicAuthenticationError
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
@@ -88,12 +92,45 @@ def _merge_psycopg2_connect_args(
     merged value. Caller-supplied entries win on key conflicts.
     """
     caller_connect_args = extra_engine_kwargs.pop("connect_args", None) or {}
+    if is_shared_supabase_profile() and "options" in caller_connect_args:
+        raise ValueError(
+            "Caller-supplied psycopg2 options are forbidden by the shared-Supabase profile."
+        )
     merged: dict[str, Any] = {
         **psycopg2_keepalive_connect_args(),
         **pg_ssl_psycopg2_connect_args(),
         **caller_connect_args,
     }
+    if is_shared_supabase_profile():
+        # libpq sets this before the first SQLAlchemy checkout.  The checkout
+        # listener below resets and verifies it again so raw SQL cannot inherit
+        # a caller-controlled path from a pooled connection.
+        merged["options"] = f"-c search_path={shared_search_path()}"
     return merged or None
+
+
+def _set_and_assert_shared_search_path(
+    dbapi_connection: Any,
+    connection_record: Any,  # noqa: ARG001
+    connection_proxy: Any = None,  # noqa: ARG001
+) -> None:
+    """Reset the pooled psycopg2 connection to the contract path on checkout."""
+
+    if not is_shared_supabase_profile():
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute(f"SET search_path TO {shared_search_path()}")
+        cursor.execute("SHOW search_path")
+        result = cursor.fetchone()
+        assert_search_path(str(result[0]) if result else None)
+    finally:
+        cursor.close()
+
+
+def _install_shared_search_path_guard(engine: Engine) -> None:
+    if is_shared_supabase_profile():
+        event.listen(engine, "checkout", _set_and_assert_shared_search_path)
 
 
 def build_connection_string(
@@ -205,6 +242,7 @@ class SqlEngine:
         db_api: str = SYNC_DB_API,
         use_iam: bool = USE_IAM_AUTH,
         connection_string: str | None = None,
+        purpose: str = "api_sync",
         **extra_engine_kwargs: Any,
     ) -> None:
         """NOTE: enforce that pool_size and pool_max_overflow are passed in. These are
@@ -217,6 +255,16 @@ class SqlEngine:
         with cls._lock:
             if cls._engine:
                 return
+
+            if is_shared_supabase_profile():
+                assert_pool_request(
+                    pool_size=pool_size, max_overflow=max_overflow, purpose=purpose
+                )
+                if connection_string is not None:
+                    raise ValueError(
+                        "The shared-Supabase profile does not permit caller-supplied "
+                        "database connection strings."
+                    )
 
             if not connection_string:
                 connection_string = build_connection_string(
@@ -265,6 +313,8 @@ class SqlEngine:
             # echo=True here for inspecting all emitted db queries
             engine = create_engine(connection_string, **final_engine_kwargs)
 
+            _install_shared_search_path_guard(engine)
+
             if use_iam:
                 event.listen(engine, "do_connect", provide_iam_token)
 
@@ -288,6 +338,13 @@ class SqlEngine:
             if not DB_READONLY_USER or not DB_READONLY_PASSWORD:
                 raise ValueError(
                     "Custom database user credentials not configured in environment variables"
+                )
+
+            if is_shared_supabase_profile():
+                assert_pool_request(
+                    pool_size=pool_size,
+                    max_overflow=max_overflow,
+                    purpose="readonly",
                 )
 
             # Build connection string with custom user
@@ -330,6 +387,8 @@ class SqlEngine:
             logger.info("Creating engine with kwargs: %s", final_engine_kwargs)
             # echo=True here for inspecting all emitted db queries
             engine = create_engine(connection_string, **final_engine_kwargs)
+
+            _install_shared_search_path_guard(engine)
 
             if USE_IAM_AUTH:
                 event.listen(engine, "do_connect", provide_iam_token)

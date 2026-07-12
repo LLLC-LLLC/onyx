@@ -8,6 +8,7 @@ Create Date: 2024-10-15 17:47:44.108537
 
 from alembic import op
 import sqlalchemy as sa
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 revision = "6756efa39ada"
 down_revision = "5d12a446f5c0"
@@ -26,19 +27,19 @@ Note: Downgrade will assign new integer IDs, not restore original ones.
 
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+    assert_shared_migration_preconditions(op.get_bind())
 
     op.add_column(
         "chat_session",
         sa.Column(
             "new_id",
             sa.UUID(as_uuid=True),
-            server_default=sa.text("gen_random_uuid()"),
+            server_default=sa.text("public.gen_random_uuid()"),
             nullable=False,
         ),
     )
 
-    op.execute("UPDATE chat_session SET new_id = gen_random_uuid();")
+    op.execute("UPDATE chat_session SET new_id = public.gen_random_uuid();")
 
     op.add_column(
         "chat_message",

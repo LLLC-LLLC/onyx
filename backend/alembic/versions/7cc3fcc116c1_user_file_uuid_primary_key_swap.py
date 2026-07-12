@@ -12,6 +12,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as psql
 import logging
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 logger = logging.getLogger("alembic.runtime.migration")
 
@@ -24,6 +25,8 @@ depends_on = None
 
 def upgrade() -> None:
     """Swap user_file primary key from integer to UUID."""
+
+    assert_shared_migration_preconditions(op.get_bind())
 
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -99,7 +102,7 @@ def upgrade() -> None:
         "user_file",
         "id",
         existing_type=psql.UUID(as_uuid=True),
-        server_default=sa.text("gen_random_uuid()"),
+        server_default=sa.text("public.gen_random_uuid()"),
     )
 
     # Create new primary key

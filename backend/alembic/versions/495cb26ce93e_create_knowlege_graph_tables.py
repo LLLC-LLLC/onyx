@@ -13,9 +13,8 @@ from sqlalchemy import text
 from datetime import datetime, timedelta
 
 from onyx.configs.app_configs import DB_READONLY_USER
-from onyx.configs.app_configs import DB_READONLY_PASSWORD
-from shared_configs.configs import MULTI_TENANT
-from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
+from onyx.configs.app_configs import POSTGRES_EXTENSION_SCHEMA
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 # revision identifiers, used by Alembic.
 revision = "495cb26ce93e"
@@ -25,40 +24,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Create a new permission-less user to be later used for knowledge graph queries.
-    # The user will later get temporary read privileges for a specific view that will be
-    # ad hoc generated specific to a knowledge graph query.
-    #
-    # Note: in order for the migration to run, the DB_READONLY_USER and DB_READONLY_PASSWORD
-    # environment variables MUST be set. Otherwise, an exception will be raised.
-
-    if not MULTI_TENANT:
-        # Enable pg_trgm extension if not already enabled
-        op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-
-        # Create read-only db user here only in single tenant mode. For multi-tenant mode,
-        # the user is created in the alembic_tenants migration.
-        if not (DB_READONLY_USER and DB_READONLY_PASSWORD):
-            raise Exception("DB_READONLY_USER or DB_READONLY_PASSWORD is not set")
-
-        op.execute(
-            text(f"""
-                DO $$
-                BEGIN
-                    -- Check if the read-only user already exists
-                    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{DB_READONLY_USER}') THEN
-                        -- Create the read-only user with the specified password
-                        EXECUTE format('CREATE USER %I WITH PASSWORD %L', '{DB_READONLY_USER}', '{DB_READONLY_PASSWORD}');
-                        -- First revoke all privileges to ensure a clean slate
-                        EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', current_database(), '{DB_READONLY_USER}');
-                        -- Grant only the CONNECT privilege to allow the user to connect to the database
-                        -- but not perform any operations without additional specific grants
-                        EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), '{DB_READONLY_USER}');
-                    END IF;
-                END
-                $$;
-                """)
-        )
+    # Skybase provisions roles and extensions outside Onyx.  This migration
+    # never creates/moves/drops database-global objects; the shared profile
+    # asserts the pre-managed extension and role contract before schema DDL.
+    assert_shared_migration_preconditions(op.get_bind())
 
     # Grant usage on current schema to readonly user
     op.execute(
@@ -471,7 +440,7 @@ def upgrade() -> None:
     # Create GIN index for clustering and normalization
     op.execute(
         "CREATE INDEX IF NOT EXISTS idx_kg_entity_clustering_trigrams "
-        f"ON kg_entity USING GIN (name {POSTGRES_DEFAULT_SCHEMA}.gin_trgm_ops)"
+        f"ON kg_entity USING GIN (name {POSTGRES_EXTENSION_SCHEMA}.gin_trgm_ops)"
     )
     op.execute(
         "CREATE INDEX IF NOT EXISTS idx_kg_entity_normalization_trigrams ON kg_entity USING GIN (name_trigrams)"
@@ -509,7 +478,7 @@ def upgrade() -> None:
 
                 -- Set name and name trigrams
                 NEW.name = name;
-                NEW.name_trigrams = {POSTGRES_DEFAULT_SCHEMA}.show_trgm(cleaned_name);
+                NEW.name_trigrams = {POSTGRES_EXTENSION_SCHEMA}.show_trgm(cleaned_name);
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql;
@@ -550,7 +519,7 @@ def upgrade() -> None:
                 UPDATE kg_entity
                 SET
                     name = doc_name,
-                    name_trigrams = {POSTGRES_DEFAULT_SCHEMA}.show_trgm(cleaned_name)
+                    name_trigrams = {POSTGRES_EXTENSION_SCHEMA}.show_trgm(cleaned_name)
                 WHERE document_id = NEW.id;
                 RETURN NEW;
             END;
@@ -632,35 +601,5 @@ def downgrade() -> None:
     op.drop_column("document", "kg_processing_time")
     op.drop_table("kg_config")
 
-    # Revoke usage on current schema for the readonly user
-    op.execute(
-        text(f"""
-            DO $$
-            BEGIN
-                IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{DB_READONLY_USER}') THEN
-                    EXECUTE format('REVOKE ALL ON SCHEMA %I FROM %I', current_schema(), '{DB_READONLY_USER}');
-                END IF;
-            END
-            $$;
-            """)
-    )
-
-    if not MULTI_TENANT:
-        # Drop read-only db user here only in single tenant mode. For multi-tenant mode,
-        # the user is dropped in the alembic_tenants migration.
-
-        op.execute(
-            text(f"""
-            DO $$
-            BEGIN
-                IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{DB_READONLY_USER}') THEN
-                    -- First revoke all privileges from the database
-                    EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', current_database(), '{DB_READONLY_USER}');
-                    -- Then drop the user
-                    EXECUTE format('DROP USER %I', '{DB_READONLY_USER}');
-                END IF;
-            END
-            $$;
-        """)
-        )
-        op.execute(text("DROP EXTENSION IF EXISTS pg_trgm"))
+    # Shared-profile branches are disposable and never downgrade.  Do not
+    # revoke schema/global privileges or mutate extensions during a downgrade.

@@ -13,6 +13,8 @@ from celery.signals import worker_shutdown
 import onyx.background.celery.apps.app_base as app_base
 from onyx.configs.constants import POSTGRES_CELERY_WORKER_DOCFETCHING_APP_NAME
 from onyx.db.engine.sql_engine import SqlEngine
+from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.server.metrics.celery_task_metrics import on_celery_task_postrun
 from onyx.server.metrics.celery_task_metrics import on_celery_task_prerun
 from onyx.server.metrics.celery_task_metrics import on_celery_task_rejected
@@ -25,6 +27,8 @@ from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
 
 logger = setup_logger()
+
+assert_worker_app_allowed("docfetching")
 
 celery_app = Celery(__name__)
 celery_app.config_from_object("onyx.background.celery.configs.docfetching")
@@ -100,7 +104,11 @@ def on_worker_init(sender: Worker, **kwargs: Any) -> None:
 
     SqlEngine.set_app_name(POSTGRES_CELERY_WORKER_DOCFETCHING_APP_NAME)
     pool_size = cast(int, sender.concurrency)  # ty: ignore[unresolved-attribute]
-    SqlEngine.init_engine(pool_size=pool_size, max_overflow=8)
+    SqlEngine.init_engine(
+        pool_size=pool_size,
+        max_overflow=0 if is_shared_supabase_profile() else 8,
+        purpose="docfetching",
+    )
 
     app_base.wait_for_redis(sender, **kwargs)
     app_base.wait_for_db(sender, **kwargs)

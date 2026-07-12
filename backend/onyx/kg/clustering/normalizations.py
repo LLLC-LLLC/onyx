@@ -13,6 +13,7 @@ from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import ARRAY
 
+from onyx.configs.app_configs import POSTGRES_EXTENSION_SCHEMA
 from onyx.configs.kg_configs import KG_NORMALIZATION_RERANK_LEVENSHTEIN_WEIGHT
 from onyx.configs.kg_configs import KG_NORMALIZATION_RERANK_NGRAM_WEIGHTS
 from onyx.configs.kg_configs import KG_NORMALIZATION_RERANK_THRESHOLD
@@ -32,7 +33,6 @@ from onyx.kg.utils.formatting_utils import split_entity_id
 from onyx.kg.utils.formatting_utils import split_relationship_id
 from onyx.utils.logger import setup_logger
 from onyx.utils.threadpool_concurrency import run_functions_tuples_in_parallel
-from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
 
 logger = setup_logger()
 
@@ -98,7 +98,7 @@ def _normalize_one_entity(
 
         # generate trigrams of the queried entity Q
         query_trigrams = db_session.query(
-            getattr(func, POSTGRES_DEFAULT_SCHEMA)
+            getattr(func, POSTGRES_EXTENSION_SCHEMA)
             .show_trgm(cleaned_entity)
             .cast(ARRAY(String(3)))
             .label("trigrams")

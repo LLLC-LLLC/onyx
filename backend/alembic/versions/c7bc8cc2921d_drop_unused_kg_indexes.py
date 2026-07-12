@@ -21,6 +21,8 @@ of truth (``INDEXES``) so they stay in sync.
 
 import sqlalchemy as sa
 from alembic import op
+from onyx.configs.app_configs import POSTGRES_EXTENSION_SCHEMA
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 # revision identifiers, used by Alembic.
 revision = "c7bc8cc2921d"
@@ -36,7 +38,7 @@ INDEXES: list[tuple[str, str]] = [
     (
         "idx_kg_entity_clustering_trigrams",
         "CREATE INDEX IF NOT EXISTS idx_kg_entity_clustering_trigrams "
-        "ON kg_entity USING gin (name public.gin_trgm_ops)",
+        f"ON kg_entity USING gin (name {POSTGRES_EXTENSION_SCHEMA}.gin_trgm_ops)",
     ),
     (
         "idx_kg_entity_normalization_trigrams",
@@ -293,6 +295,7 @@ INDEXES: list[tuple[str, str]] = [
 
 
 def upgrade() -> None:
+    assert_shared_migration_preconditions(op.get_bind())
     for name, _create_sql in INDEXES:
         op.execute(sa.text(f"DROP INDEX IF EXISTS {name};"))
 

@@ -13,6 +13,7 @@ from celery.signals import worker_shutdown
 import onyx.background.celery.apps.app_base as app_base
 from onyx.configs.constants import POSTGRES_CELERY_WORKER_HEAVY_APP_NAME
 from onyx.db.engine.sql_engine import SqlEngine
+from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
 from onyx.server.metrics.celery_task_metrics import on_celery_task_postrun
 from onyx.server.metrics.celery_task_metrics import on_celery_task_prerun
 from onyx.server.metrics.celery_task_metrics import on_celery_task_rejected
@@ -23,6 +24,8 @@ from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
 
 logger = setup_logger()
+
+assert_worker_app_allowed("heavy")
 
 celery_app = Celery(__name__)
 celery_app.config_from_object("onyx.background.celery.configs.heavy")

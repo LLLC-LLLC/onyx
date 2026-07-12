@@ -12,6 +12,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as psql
 import logging
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 logger = logging.getLogger("alembic.runtime.migration")
 # revision identifiers, used by Alembic.
@@ -24,8 +25,9 @@ depends_on = None
 def upgrade() -> None:
     """Add new columns and tables without modifying existing data."""
 
-    # Enable pgcrypto for UUID generation
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+    # Skybase pre-installs pgcrypto in public; shared-profile migrations only
+    # assert that global prerequisite rather than creating it.
+    assert_shared_migration_preconditions(op.get_bind())
 
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -49,7 +51,7 @@ def upgrade() -> None:
                 "new_id",
                 psql.UUID(as_uuid=True),
                 nullable=True,
-                server_default=sa.text("gen_random_uuid()"),
+                server_default=sa.text("public.gen_random_uuid()"),
             ),
         )
         op.create_unique_constraint("uq_user_file_new_id", "user_file", ["new_id"])

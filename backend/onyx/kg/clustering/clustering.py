@@ -7,6 +7,7 @@ from redis.lock import Lock as RedisLock
 from sqlalchemy import func
 from sqlalchemy import text
 
+from onyx.configs.app_configs import POSTGRES_EXTENSION_SCHEMA
 from onyx.configs.constants import CELERY_GENERIC_BEAT_LOCK_TIMEOUT
 from onyx.configs.kg_configs import KG_CLUSTERING_RETRIEVE_THRESHOLD
 from onyx.configs.kg_configs import KG_CLUSTERING_THRESHOLD
@@ -34,7 +35,6 @@ from onyx.kg.utils.formatting_utils import make_relationship_id
 from onyx.kg.utils.lock_utils import extend_lock
 from onyx.utils.logger import setup_logger
 from onyx.utils.threadpool_concurrency import run_functions_tuples_in_parallel
-from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
 
 logger = setup_logger()
 
@@ -180,7 +180,7 @@ def _cluster_one_grounded_entity(
                     # find entities of the same type with a similar name
                     *filtering,
                     KGEntity.entity_type_id_name == entity.entity_type_id_name,
-                    getattr(func, POSTGRES_DEFAULT_SCHEMA).similarity_op(
+                    getattr(func, POSTGRES_EXTENSION_SCHEMA).similarity_op(
                         KGEntity.name, entity_name
                     ),
                 )

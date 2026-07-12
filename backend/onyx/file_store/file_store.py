@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Any
 from typing import cast
 from typing import IO
+from typing import NoReturn
 from typing import NotRequired
 from typing import TYPE_CHECKING
 from typing import TypedDict
@@ -35,6 +36,8 @@ from onyx.db.file_record import get_filerecord_by_prefix
 from onyx.db.file_record import upsert_filerecord
 from onyx.db.models import FileRecord
 from onyx.db.models import FileRecord as FileStoreModel
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
+from onyx.db.skybase_shared_supabase import SharedSupabaseContractError
 from onyx.file_store.s3_key_utils import generate_s3_key
 from onyx.utils.file import FileWithMimeType
 from onyx.utils.logger import setup_logger
@@ -170,9 +173,68 @@ class FileStore(ABC):
 
     @abstractmethod
     def list_files_by_prefix(self, prefix: str) -> list[FileRecord]:
-        """
-        List all file IDs that start with the given prefix.
-        """
+        """List all file IDs that start with the given prefix."""
+        raise NotImplementedError
+
+
+class DisabledFileStore(FileStore):
+    """Health-only FileStore boundary used before the Skybase storage broker.
+
+    ``initialize`` intentionally has no side effect.  Every object operation
+    fails before a credential, database blob, or direct S3 request can be
+    created.  The later broker adapter replaces this class rather than adding
+    an S3 exception to the shared profile.
+    """
+
+    def initialize(self) -> None:
+        return None
+
+    @staticmethod
+    def _disabled(*_: object) -> NoReturn:
+        raise SharedSupabaseContractError(
+            "FileStore object operations are disabled until the Skybase storage broker is installed."
+        )
+
+    def has_file(self, file_id: str, file_origin: FileOrigin, file_type: str) -> bool:  # noqa: ARG002
+        self._disabled(file_id, file_origin, file_type)
+
+    def save_file(
+        self,
+        content: IO,
+        display_name: str | None,
+        file_origin: FileOrigin,
+        file_type: str,
+        file_metadata: dict[str, Any] | None = None,
+        file_id: str | None = None,
+    ) -> str:  # noqa: ARG002
+        self._disabled(
+            content, display_name, file_origin, file_type, file_metadata, file_id
+        )
+
+    def read_file(
+        self, file_id: str, mode: str | None = None, use_tempfile: bool = False
+    ) -> IO[bytes]:  # noqa: ARG002
+        self._disabled(file_id, mode, use_tempfile)
+
+    def read_file_record(self, file_id: str) -> FileStoreModel:  # noqa: ARG002
+        self._disabled(file_id)
+
+    def get_file_size(
+        self, file_id: str, db_session: Session | None = None
+    ) -> int | None:  # noqa: ARG002
+        self._disabled(file_id, db_session)
+
+    def delete_file(self, file_id: str, error_on_missing: bool = True) -> None:  # noqa: ARG002
+        self._disabled(file_id, error_on_missing)
+
+    def get_file_with_mime_type(self, file_id: str) -> FileWithMimeType | None:  # noqa: ARG002
+        self._disabled(file_id)
+
+    def change_file_id(self, old_file_id: str, new_file_id: str) -> None:  # noqa: ARG002
+        self._disabled(old_file_id, new_file_id)
+
+    def list_files_by_prefix(self, prefix: str) -> list[FileRecord]:  # noqa: ARG002
+        self._disabled(prefix)
 
 
 class S3BackedFileStore(FileStore):
@@ -584,6 +646,10 @@ class S3BackedFileStore(FileStore):
 
 
 def get_s3_file_store() -> S3BackedFileStore:
+    if is_shared_supabase_profile():
+        raise SharedSupabaseContractError(
+            "Direct S3 FileStore access is forbidden in the shared-Supabase profile."
+        )
     """
     Returns the S3 file store implementation.
     """
@@ -607,6 +673,10 @@ def get_s3_file_store() -> S3BackedFileStore:
 
 
 def get_gcs_file_store() -> "GCSBackedFileStore":
+    if is_shared_supabase_profile():
+        raise SharedSupabaseContractError(
+            "Direct GCS FileStore access is forbidden in the shared-Supabase profile."
+        )
     """Returns the GCS file store implementation."""
     from onyx.configs.app_configs import GCS_FILE_STORE_BUCKET_NAME
     from onyx.configs.app_configs import GCS_FILE_STORE_PREFIX
@@ -649,6 +719,9 @@ def get_default_file_store() -> FileStore:
     from onyx.configs.app_configs import FILE_STORE_BACKEND
     from onyx.configs.constants import FileStoreType
 
+    if is_shared_supabase_profile():
+        return DisabledFileStore()
+
     backend = FileStoreType(FILE_STORE_BACKEND)
 
     if backend == FileStoreType.POSTGRES:
@@ -658,5 +731,8 @@ def get_default_file_store() -> FileStore:
 
     if backend == FileStoreType.GCS:
         return get_gcs_file_store()
+
+    if backend == FileStoreType.DISABLED:
+        return DisabledFileStore()
 
     return get_s3_file_store()

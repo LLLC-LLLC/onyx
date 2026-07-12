@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import cast
 
-from botocore.exceptions import ClientError
-
 from onyx.db._deprecated.pg_file_store import delete_lobj_by_id, read_lobj
-from onyx.file_store.file_store import get_s3_file_store
+from onyx.db.skybase_shared_supabase import SharedSupabaseContractError
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 
 # revision identifiers, used by Alembic.
@@ -26,6 +26,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    assert_shared_migration_preconditions(bind)
     try:
         # Modify existing file_store table to support external storage
         op.rename_table("file_store", "file_record")
@@ -72,13 +74,29 @@ def upgrade() -> None:
         else:
             raise
 
-    print(
-        "External storage configured - migrating files from PostgreSQL to external storage..."
-    )
-    # if we fail midway through this, we'll have a partial success. Running the migration
-    # again should allow us to continue.
-    _migrate_files_to_external_storage()
-    print("File migration completed successfully!")
+    if is_shared_supabase_profile():
+        # This historical migration predates the Skybase storage broker.  Its
+        # schema evolution remains necessary for the CE history, but moving
+        # large objects to a direct S3 client is forbidden.  Refuse to discard
+        # existing data; an empty disposable branch continues without I/O.
+        remaining_large_objects = bind.execute(
+            text("SELECT COUNT(*) FROM file_record WHERE lobj_oid IS NOT NULL")
+        ).scalar_one()
+        if remaining_large_objects:
+            raise SharedSupabaseContractError(
+                "c9e2 refuses to migrate existing large objects to direct S3 in "
+                "the shared-Supabase profile. Install the Skybase storage broker "
+                "or use a fresh disposable branch."
+            )
+        print("Shared profile: skipped direct object-storage migration.")
+    else:
+        print(
+            "External storage configured - migrating files from PostgreSQL to external storage..."
+        )
+        # if we fail midway through this, we'll have a partial success. Running the migration
+        # again should allow us to continue.
+        _migrate_files_to_external_storage()
+        print("File migration completed successfully!")
 
     # Remove lobj_oid column
     op.drop_column("file_record", "lobj_oid")
@@ -86,6 +104,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Revert schema changes and migrate files from external storage back to PostgreSQL large objects."""
+
+    if is_shared_supabase_profile():
+        raise SharedSupabaseContractError(
+            "The shared-Supabase profile never runs historical FileStore downgrades; "
+            "discard and recreate the disposable branch instead."
+        )
 
     print(
         "Reverting to PostgreSQL-backed file store – migrating files from external storage …"
@@ -132,6 +156,11 @@ def _migrate_files_to_postgres() -> None:
 
     The logic mirrors *inverse* of `_migrate_files_to_external_storage` used on upgrade.
     """
+
+    # Delayed imports keep the shared-profile migration path from importing a
+    # direct S3 client at all.
+    from botocore.exceptions import ClientError
+    from onyx.file_store.file_store import get_s3_file_store
 
     # Obtain DB session from Alembic context
     bind = op.get_bind()
@@ -214,6 +243,10 @@ def _migrate_files_to_postgres() -> None:
 
 def _migrate_files_to_external_storage() -> None:
     """Migrate files from PostgreSQL large objects to external storage"""
+    # See the matching delayed import above. This legacy path is unreachable
+    # when the shared-Supabase profile is active.
+    from onyx.file_store.file_store import get_s3_file_store
+
     # Get database session
     bind = op.get_bind()
     session = Session(bind=bind)

@@ -66,6 +66,8 @@ from onyx.db.engine.async_sql_engine import reset_sqlalchemy_async_engine
 from onyx.db.engine.connection_warmup import warm_up_connections
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.engine.sql_engine import SqlEngine
+from onyx.db.skybase_shared_supabase import is_disabled_native_surface
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.error_handling.exceptions import register_onyx_exception_handlers
 from onyx.file_store.file_store import get_default_file_store
 from onyx.hooks.registry import validate_registry
@@ -343,6 +345,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     SqlEngine.init_engine(
         pool_size=POSTGRES_API_SERVER_POOL_SIZE,
         max_overflow=POSTGRES_API_SERVER_POOL_OVERFLOW,
+        purpose="api_sync",
     )
     SqlEngine.get_engine()
 
@@ -384,7 +387,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     setup_tracing()
 
     # fill up Postgres connection pools
-    await warm_up_connections()
+    if not is_shared_supabase_profile():
+        await warm_up_connections()
 
     if not MULTI_TENANT:
         # We cache this at the beginning so there is no delay in the first telemetry
@@ -396,7 +400,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
             setup_onyx(db_session, POSTGRES_DEFAULT_SCHEMA)
             # set up the file store (e.g. create bucket if needed). On multi-tenant,
             # this is done via IaC
-            get_default_file_store().initialize()
+            if not is_shared_supabase_profile():
+                get_default_file_store().initialize()
     else:
         setup_multitenant_onyx()
 
@@ -504,6 +509,20 @@ def get_application(lifespan_override: Lifespan | None = None) -> FastAPI:
     )
 
     register_onyx_exception_handlers(application)
+
+    if is_shared_supabase_profile():
+
+        @application.middleware("http")
+        async def deny_unowned_native_surfaces(request: Request, call_next: Any) -> Any:
+            if is_disabled_native_surface(request.url.path):
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={
+                        "detail": "This native Onyx surface is disabled in the "
+                        "Skybase shared-Supabase profile."
+                    },
+                )
+            return await call_next(request)
 
     include_router_with_global_prefix_prepended(application, password_router)
     include_router_with_global_prefix_prepended(application, chat_router)

@@ -14,12 +14,47 @@ readonly PROVENANCE_FILE="${REPO_ROOT}/SKYBASE_UPSTREAM.md"
 readonly IMAGE_FILE="${REPO_ROOT}/backend/Dockerfile.skybase-ce"
 readonly REQUIREMENTS_FILE="${REPO_ROOT}/backend/requirements/skybase-ce.txt"
 readonly WORKER_FILE="${REPO_ROOT}/backend/supervisord.skybase-ce.conf"
-readonly T1_ALLOWED_OVERLAY_PATHS=(
+readonly T2_ALLOWED_OVERLAY_PATHS=(
     "SKYBASE_UPSTREAM.md"
     "scripts/verify-skybase-provenance.sh"
+    "scripts/render-skybase-supabase-env.py"
+    "scripts/run-skybase-ce-alembic.sh"
     "backend/Dockerfile.skybase-ce"
     "backend/requirements/skybase-ce.txt"
     "backend/supervisord.skybase-ce.conf"
+    "backend/alembic/env.py"
+    "backend/alembic/versions/c9e2cd766c29_add_s3_file_store_table.py"
+    "backend/alembic/versions/6756efa39ada_id_uuid_for_chat_session.py"
+    "backend/alembic/versions/9b66d3156fc6_user_file_schema_additions.py"
+    "backend/alembic/versions/495cb26ce93e_create_knowlege_graph_tables.py"
+    "backend/alembic/versions/36e9220ab794_update_kg_trigger_functions.py"
+    "backend/alembic/versions/c7bc8cc2921d_drop_unused_kg_indexes.py"
+    "backend/alembic/versions/0cd424f32b1d_user_file_data_preparation_and_backfill.py"
+    "backend/alembic/versions/7cc3fcc116c1_user_file_uuid_primary_key_swap.py"
+    "backend/onyx/background/celery/apps/beat.py"
+    "backend/onyx/background/celery/apps/client.py"
+    "backend/onyx/background/celery/apps/docfetching.py"
+    "backend/onyx/background/celery/apps/docprocessing.py"
+    "backend/onyx/background/celery/apps/heavy.py"
+    "backend/onyx/background/celery/apps/light.py"
+    "backend/onyx/background/celery/apps/monitoring.py"
+    "backend/onyx/background/celery/apps/primary.py"
+    "backend/onyx/background/celery/apps/scheduled_tasks.py"
+    "backend/onyx/background/celery/apps/user_file_processing.py"
+    "backend/onyx/background/indexing/job_client.py"
+    "backend/onyx/configs/app_configs.py"
+    "backend/onyx/configs/constants.py"
+    "backend/onyx/db/engine/async_sql_engine.py"
+    "backend/onyx/db/engine/connection_warmup.py"
+    "backend/onyx/db/engine/sql_engine.py"
+    "backend/onyx/db/skybase_shared_supabase.py"
+    "backend/onyx/file_store/file_store.py"
+    "backend/onyx/kg/clustering/clustering.py"
+    "backend/onyx/kg/clustering/normalizations.py"
+    "backend/onyx/main.py"
+    "backend/onyx/setup.py"
+    "backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py"
+    "backend/tests/unit/scripts/test_skybase_supabase_scripts.py"
 )
 readonly COPIED_SOURCE_ROOTS=(
     "backend/alembic"
@@ -75,18 +110,18 @@ require_disabled_env() {
         fail "${env_name} must be assigned exactly once and set to false"
 }
 
-require_t1_overlay_path() {
+require_t2_overlay_path() {
     local changed_path="$1"
     local allowed_path
 
-    for allowed_path in "${T1_ALLOWED_OVERLAY_PATHS[@]}"; do
+    for allowed_path in "${T2_ALLOWED_OVERLAY_PATHS[@]}"; do
         [[ "${changed_path}" == "${allowed_path}" ]] && return 0
     done
 
-    fail "T1 overlay path is not allowlisted: ${changed_path}"
+    fail "T2 overlay path is not allowlisted: ${changed_path}"
 }
 
-verify_t1_overlay_allowlist() {
+verify_t2_overlay_allowlist() {
     local changed_path
     local copied_root
     local ee_descendant
@@ -98,19 +133,19 @@ verify_t1_overlay_allowlist() {
     done
 
     while IFS= read -r changed_path; do
-        [[ -n "${changed_path}" ]] && require_t1_overlay_path "${changed_path}"
+        [[ -n "${changed_path}" ]] && require_t2_overlay_path "${changed_path}"
     done < <(git -C "${REPO_ROOT}" diff --name-only "${EXPECTED_UPSTREAM_COMMIT}...HEAD")
 
     while IFS= read -r changed_path; do
-        [[ -n "${changed_path}" ]] && require_t1_overlay_path "${changed_path}"
+        [[ -n "${changed_path}" ]] && require_t2_overlay_path "${changed_path}"
     done < <(git -C "${REPO_ROOT}" diff --name-only "${EXPECTED_UPSTREAM_COMMIT}")
 
     while IFS= read -r -d '' changed_path; do
-        require_t1_overlay_path "${changed_path}"
+        require_t2_overlay_path "${changed_path}"
     done < <(git -C "${REPO_ROOT}" ls-files --others --exclude-standard -z)
 
     while IFS= read -r -d '' changed_path; do
-        require_t1_overlay_path "${changed_path}"
+        require_t2_overlay_path "${changed_path}"
     done < <(git -C "${REPO_ROOT}" ls-files --others --ignored --exclude-standard -z)
 }
 
@@ -140,7 +175,7 @@ commit_tree="$(git -C "${REPO_ROOT}" rev-parse "${EXPECTED_UPSTREAM_COMMIT}^{tre
 git -C "${REPO_ROOT}" merge-base --is-ancestor "${EXPECTED_UPSTREAM_COMMIT}" HEAD || \
     fail "current branch is not based on the pinned upstream commit"
 
-verify_t1_overlay_allowlist
+verify_t2_overlay_allowlist
 
 upstream_default_lock_blob="$(git -C "${REPO_ROOT}" rev-parse "${EXPECTED_UPSTREAM_COMMIT}:backend/requirements/default.txt")"
 current_default_lock_blob="$(git -C "${REPO_ROOT}" hash-object backend/requirements/default.txt)"
@@ -155,7 +190,7 @@ require_fixed_line "${REQUIREMENTS_FILE}" "-r default.txt"
 require_fixed_line "${PROVENANCE_FILE}" "- Onyx receives no provider credentials. A later configuration slice must"
 require_fixed_line "${PROVENANCE_FILE}" "  allow only a Skybase LLM proxy base URL and reject direct provider base URLs."
 require_fixed_line "${PROVENANCE_FILE}" "  LiteLLM HTTP boundary. Private Railway networking alone does not prove that"
-require_fixed_line "${PROVENANCE_FILE}" "- PostgreSQL extension availability, including \`pgcrypto\`, is a separate"
+require_fixed_line "${PROVENANCE_FILE}" "- PostgreSQL extension availability is a branch-bootstrap preflight:"
 
 non_comment_requirements="$(grep -Ev '^[[:space:]]*(#.*)?$' "${REQUIREMENTS_FILE}" || true)"
 [[ "${non_comment_requirements}" == '-r default.txt' ]] || \
@@ -224,12 +259,118 @@ done
 require_disabled_env 'ENABLE_PAID_ENTERPRISE_EDITION_FEATURES'
 require_disabled_env 'LICENSE_ENFORCEMENT_ENABLED'
 
+for expected_image_line in \
+    'FILE_STORE_BACKEND="disabled"' \
+    'SKYBASE_ONYX_SHARED_SUPABASE="true"' \
+    'SKIP_WARM_UP="true"'; do
+    grep -Fq -- "${expected_image_line}" "${IMAGE_FILE}" || \
+        fail "CE image contract is missing shared-profile setting: ${expected_image_line}"
+done
+
 for expected_worker_line in \
-    'celery -A onyx.background.celery.versioned_apps.docfetching worker' \
-    'celery -A onyx.background.celery.versioned_apps.docprocessing worker'; do
+    'celery -A onyx.background.celery.versioned_apps.docfetching worker --hostname=skybase-docfetching@%%h --concurrency=1 --pool=threads -Q connector_doc_fetching' \
+    'celery -A onyx.background.celery.versioned_apps.docprocessing worker --hostname=skybase-docprocessing@%%h --concurrency=1 --pool=threads -Q docprocessing'; do
     grep -Fq -- "${expected_worker_line}" "${WORKER_FILE}" || \
         fail "CE worker contract is missing: ${expected_worker_line}"
 done
+
+[[ "$(grep -c '^\[program:' "${WORKER_FILE}")" == "2" ]] || \
+    fail "shared supervisor may define only docfetching and docprocessing"
+
+readonly SHARED_MIGRATIONS=(
+    "backend/alembic/versions/c9e2cd766c29_add_s3_file_store_table.py"
+    "backend/alembic/versions/6756efa39ada_id_uuid_for_chat_session.py"
+    "backend/alembic/versions/9b66d3156fc6_user_file_schema_additions.py"
+    "backend/alembic/versions/495cb26ce93e_create_knowlege_graph_tables.py"
+    "backend/alembic/versions/36e9220ab794_update_kg_trigger_functions.py"
+    "backend/alembic/versions/c7bc8cc2921d_drop_unused_kg_indexes.py"
+    "backend/alembic/versions/0cd424f32b1d_user_file_data_preparation_and_backfill.py"
+    "backend/alembic/versions/7cc3fcc116c1_user_file_uuid_primary_key_swap.py"
+)
+shared_migration_paths=()
+
+for migration in "${SHARED_MIGRATIONS[@]}"; do
+    require_file "${REPO_ROOT}/${migration}"
+    shared_migration_paths+=("${REPO_ROOT}/${migration}")
+done
+
+if grep -nE -- 'CREATE[[:space:]]+EXTENSION|DROP[[:space:]]+EXTENSION|CREATE[[:space:]]+(USER|ROLE)|DROP[[:space:]]+(USER|ROLE)|GRANT[[:space:]]+CONNECT|REVOKE[[:space:]]+ALL[[:space:]]+ON[[:space:]]+DATABASE' \
+    "${shared_migration_paths[@]}"; then
+    fail "shared migrations must not mutate global extensions, roles, or database grants"
+fi
+
+if grep -nE -- 'public\.gin_trgm_ops|POSTGRES_DEFAULT_SCHEMA[)}.]*(show_trgm|similarity_op)' \
+    "${REPO_ROOT}/backend/alembic/versions/495cb26ce93e_create_knowlege_graph_tables.py" \
+    "${REPO_ROOT}/backend/alembic/versions/36e9220ab794_update_kg_trigger_functions.py" \
+    "${REPO_ROOT}/backend/alembic/versions/c7bc8cc2921d_drop_unused_kg_indexes.py" \
+    "${REPO_ROOT}/backend/onyx/kg/clustering/normalizations.py" \
+    "${REPO_ROOT}/backend/onyx/kg/clustering/clustering.py"; then
+    fail "trigram functions/operators must resolve through POSTGRES_EXTENSION_SCHEMA"
+fi
+
+for uuid_migration in \
+    "backend/alembic/versions/6756efa39ada_id_uuid_for_chat_session.py" \
+    "backend/alembic/versions/9b66d3156fc6_user_file_schema_additions.py" \
+    "backend/alembic/versions/0cd424f32b1d_user_file_data_preparation_and_backfill.py" \
+    "backend/alembic/versions/7cc3fcc116c1_user_file_uuid_primary_key_swap.py"; do
+    grep -Fq -- 'public.gen_random_uuid()' "${REPO_ROOT}/${uuid_migration}" || \
+        fail "UUID migration lacks explicit public.gen_random_uuid() qualification: ${uuid_migration}"
+done
+
+readonly C9E2_FILE="${REPO_ROOT}/backend/alembic/versions/c9e2cd766c29_add_s3_file_store_table.py"
+if grep -nE -- '^from onyx\.file_store\.file_store import get_s3_file_store' "${C9E2_FILE}"; then
+    fail "c9e2 must not import a direct S3 client before its shared-profile gate"
+fi
+grep -Fq -- 'if is_shared_supabase_profile():' "${C9E2_FILE}" || \
+    fail "c9e2 lacks the no-S3 shared-profile gate"
+grep -Fq -- 'Shared profile: skipped direct object-storage migration.' "${C9E2_FILE}" || \
+    fail "c9e2 lacks the fail-closed no-S3 migration path"
+
+readonly CONTRACT_FILE="${REPO_ROOT}/backend/onyx/db/skybase_shared_supabase.py"
+readonly SYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/sql_engine.py"
+readonly ASYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/async_sql_engine.py"
+readonly WARMUP_FILE="${REPO_ROOT}/backend/onyx/db/engine/connection_warmup.py"
+for contract_line in \
+    'SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"' \
+    'MAX_RUNTIME_CONNECTIONS: Final = 12' \
+    'ALLOWED_WORKER_APPS: Final = frozenset({"docfetching", "docprocessing"})' \
+    'FILE_STORE_BACKEND' \
+    'The shared-Supabase profile accepts no native provider'; do
+    grep -Fq -- "${contract_line}" "${CONTRACT_FILE}" || \
+        fail "shared contract is missing: ${contract_line}"
+done
+for engine_file in "${SYNC_ENGINE_FILE}" "${ASYNC_ENGINE_FILE}"; do
+    grep -Fq -- 'shared_search_path' "${engine_file}" || \
+        fail "engine does not enforce the shared search path: ${engine_file}"
+done
+grep -Fq -- 'Connection warmup is disabled in the shared-Supabase profile.' "${WARMUP_FILE}" || \
+    fail "shared profile must disable legacy connection warmup"
+
+for denied_worker in primary light heavy user_file_processing scheduled_tasks monitoring beat client; do
+    grep -Fq -- "assert_worker_app_allowed(\"${denied_worker}\")" \
+        "${REPO_ROOT}/backend/onyx/background/celery/apps/${denied_worker}.py" || \
+        fail "denied worker is missing its import-time shared-profile guard: ${denied_worker}"
+done
+for allowed_worker in docfetching docprocessing; do
+    grep -Fq -- "assert_worker_app_allowed(\"${allowed_worker}\")" \
+        "${REPO_ROOT}/backend/onyx/background/celery/apps/${allowed_worker}.py" || \
+        fail "allowed worker is missing its shared-profile guard: ${allowed_worker}"
+done
+
+grep -Fq -- '# file-under-test: backend/onyx/db/skybase_shared_supabase.py' \
+    "${REPO_ROOT}/backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py" || \
+    fail "contract test must name its file under test"
+grep -Fq -- '# file-under-test: scripts/render-skybase-supabase-env.py' \
+    "${REPO_ROOT}/backend/tests/unit/scripts/test_skybase_supabase_scripts.py" || \
+    fail "renderer test must name its file under test"
+
+renderer_pyc="$(mktemp "${TMPDIR:-/tmp}/skybase-renderer.XXXXXX.pyc")"
+trap 'rm -f "${renderer_pyc}"' EXIT
+python3 -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' \
+    "${REPO_ROOT}/scripts/render-skybase-supabase-env.py" "${renderer_pyc}" || \
+    fail "shared-Supabase renderer does not compile"
+bash -n "${REPO_ROOT}/scripts/run-skybase-ce-alembic.sh" || \
+    fail "shared-Supabase Alembic launcher has invalid shell syntax"
 
 printf 'skybase provenance verification passed for %s (%s)\n' \
     "${EXPECTED_UPSTREAM_TAG}" "${EXPECTED_UPSTREAM_COMMIT}"

@@ -17,6 +17,7 @@ from typing import Optional
 
 from onyx.configs.constants import POSTGRES_CELERY_WORKER_INDEXING_CHILD_APP_NAME
 from onyx.db.engine.sql_engine import SqlEngine
+from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
 from shared_configs.configs import TENANT_ID_PREFIX
@@ -76,7 +77,11 @@ def _initializer(
 
     # Initialize a new engine with desired parameters
     SqlEngine.init_engine(
-        pool_size=4, max_overflow=12, pool_recycle=60, pool_pre_ping=True
+        pool_size=1 if is_shared_supabase_profile() else 4,
+        max_overflow=0 if is_shared_supabase_profile() else 12,
+        pool_recycle=60,
+        pool_pre_ping=True,
+        purpose="indexing_child",
     )
 
     # Proceed with executing the target function

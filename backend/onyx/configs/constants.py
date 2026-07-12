@@ -377,6 +377,7 @@ class FileStoreType(str, Enum):
     S3 = "s3"
     POSTGRES = "postgres"
     GCS = "gcs"
+    DISABLED = "disabled"
 
 
 class FileOrigin(str, Enum):

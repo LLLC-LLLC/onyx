@@ -9,7 +9,8 @@ Create Date: 2025-06-22 17:33:25.833733
 from alembic import op
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
+from onyx.configs.app_configs import POSTGRES_EXTENSION_SCHEMA
+from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 
 # revision identifiers, used by Alembic.
 revision = "36e9220ab794"
@@ -29,6 +30,7 @@ def _get_tenant_contextvar(session: Session) -> str:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    assert_shared_migration_preconditions(bind)
     session = Session(bind=bind)
 
     # Create kg_entity trigger to update kg_entity.name and its trigrams
@@ -64,7 +66,7 @@ def upgrade() -> None:
 
                 -- Set name and name trigrams
                 NEW.name = name;
-                NEW.name_trigrams = {POSTGRES_DEFAULT_SCHEMA}.show_trgm(cleaned_name);
+                NEW.name_trigrams = {POSTGRES_EXTENSION_SCHEMA}.show_trgm(cleaned_name);
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql;
@@ -105,7 +107,7 @@ def upgrade() -> None:
                 UPDATE "{tenant_id}".kg_entity
                 SET
                     name = doc_name,
-                    name_trigrams = {POSTGRES_DEFAULT_SCHEMA}.show_trgm(cleaned_name)
+                    name_trigrams = {POSTGRES_EXTENSION_SCHEMA}.show_trgm(cleaned_name)
                 WHERE document_id = NEW.id;
                 RETURN NEW;
             END;
