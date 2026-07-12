@@ -341,6 +341,20 @@ class SearchDoc(BaseModel):
         return initial_dict
 
 
+class ProgrammaticSearchResult(BaseModel):
+    """One merged internal-search section ready for the programmatic API."""
+
+    citation_id: int
+    document_id: str
+    section_start_chunk_id: int
+    section_end_chunk_id: int
+    title: str
+    content: str
+    link: str | None
+    source_type: str
+    updated_at: str | None
+
+
 class SearchDocsResponse(BaseModel):
     search_docs: list[SearchDoc]
     # Maps the citation number to the document id
@@ -351,6 +365,10 @@ class SearchDocsResponse(BaseModel):
     # For cases where the frontend only needs to display a subset of the search docs
     # The whole list is typically still needed for later steps but this set should be saved separately
     displayed_docs: list[SearchDoc] | None = None
+    # Present only for internal SearchTool runs that back the programmatic
+    # /api/search endpoint. Other tools legitimately do not produce the
+    # merged-section identity contract.
+    programmatic_search_results: list[ProgrammaticSearchResult] | None = None
 
     @field_validator("displayed_docs", mode="before")
     @classmethod

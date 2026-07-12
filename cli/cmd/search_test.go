@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -283,5 +286,55 @@ func TestToSearchOutput(t *testing.T) {
 	}
 	if withNils.UpdatedAt != nil {
 		t.Errorf("Results[1].UpdatedAt = %v, want nil", withNils.UpdatedAt)
+	}
+}
+
+func TestSearch_RawIncludesStableIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/search" {
+			t.Errorf("path = %s, want /api/search", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"results": [{"citation_id": 41, "document_id": "document-raw", "section_start_chunk_id": 7, "section_end_chunk_id": 11, "title": "Test", "content": "full chunk text", "link": null, "source_type": "web", "updated_at": null}]
+		}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("ONYX_SERVER_URL", srv.URL)
+	t.Setenv("ONYX_PAT", "test-pat")
+	t.Setenv("ONYX_API_PREFIX", "/api")
+	ios := &iostreams.IOStreams{
+		In:          &bytes.Buffer{},
+		Out:         &bytes.Buffer{},
+		ErrOut:      &bytes.Buffer{},
+		IsStdinTTY:  false,
+		IsStdoutTTY: false,
+	}
+	cmd := newSearchCmd(ios)
+	cmd.SetArgs([]string{"--raw", "stable identity"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("search command failed: %v", err)
+	}
+
+	var response models.SearchResponse
+	if err := json.Unmarshal(ios.Out.(*bytes.Buffer).Bytes(), &response); err != nil {
+		t.Fatalf("raw output is not a search response: %v", err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("results length = %d, want 1", len(response.Results))
+	}
+	result := response.Results[0]
+	if result.DocumentID != "document-raw" {
+		t.Errorf("DocumentID = %q, want document-raw", result.DocumentID)
+	}
+	if result.SectionStartChunkID != 7 {
+		t.Errorf("SectionStartChunkID = %d, want 7", result.SectionStartChunkID)
+	}
+	if result.SectionEndChunkID != 11 {
+		t.Errorf("SectionEndChunkID = %d, want 11", result.SectionEndChunkID)
 	}
 }
