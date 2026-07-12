@@ -401,7 +401,8 @@ for health_line in \
     'is_shared_supabase_profile()' \
     'validate_shared_supabase_contract()' \
     '"type": "websocket.close", "code": 1008' \
-    'is_disabled_native_surface(scope["path"])'; do
+    '_ALLOWED_HEALTH_PATHS = frozenset({"/health", "/health/"})' \
+    'scope["path"] not in _ALLOWED_HEALTH_PATHS'; do
     grep -Fq -- "${health_line}" "${HEALTH_APP_FILE}" || \
         fail "shared health entrypoint is missing: ${health_line}"
 done

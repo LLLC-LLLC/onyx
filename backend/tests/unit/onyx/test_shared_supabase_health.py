@@ -109,6 +109,33 @@ def test_shared_profile_denies_websocket_scopes_in_clean_process(
     assert result.returncode == 0, result.stderr
 
 
+def test_shared_profile_allows_only_literal_health_paths(tmp_path: Path) -> None:
+    result = _run_profile_process(
+        tmp_path,
+        "\n".join(
+            (
+                "import asyncio",
+                "from onyx.shared_supabase_health import app",
+                "async def status_for(path):",
+                "    messages = []",
+                "    async def receive():",
+                "        return {'type': 'http.request', 'body': b'', 'more_body': False}",
+                "    async def send(message):",
+                "        messages.append(message)",
+                "    await app({'type': 'http', 'method': 'GET', 'path': path}, receive, send)",
+                "    return messages[0]['status']",
+                "assert asyncio.run(status_for('/health')) == 200",
+                "assert asyncio.run(status_for('/health/')) == 200",
+                "assert asyncio.run(status_for('//health')) == 503",
+                "assert asyncio.run(status_for('///health')) == 503",
+                "assert asyncio.run(status_for('///health///')) == 503",
+            )
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_health_entrypoint_rejects_a_non_shared_profile(tmp_path: Path) -> None:
     environment = _shared_profile_env(tmp_path)
     environment["SKYBASE_ONYX_SHARED_SUPABASE"] = "false"

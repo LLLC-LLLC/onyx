@@ -13,7 +13,6 @@ from starlette.types import Receive
 from starlette.types import Scope
 from starlette.types import Send
 
-from onyx.db.skybase_shared_supabase import is_disabled_native_surface
 from onyx.db.skybase_shared_supabase import is_shared_supabase_profile
 from onyx.db.skybase_shared_supabase import SharedSupabaseContractError
 from onyx.db.skybase_shared_supabase import validate_shared_supabase_contract
@@ -23,6 +22,7 @@ _DISABLED_BODY = (
     b'{"detail":"This native Onyx surface is disabled in the '
     b'Skybase shared-Supabase profile."}'
 )
+_ALLOWED_HEALTH_PATHS = frozenset({"/health", "/health/"})
 
 
 async def _send_json(send: Send, *, status: int, body: bytes) -> None:
@@ -65,7 +65,7 @@ async def shared_supabase_health_app(
         await send({"type": "websocket.close", "code": 1008})
         return
     if scope["type"] == "http":
-        if scope["method"] != "GET" or is_disabled_native_surface(scope["path"]):
+        if scope["method"] != "GET" or scope["path"] not in _ALLOWED_HEALTH_PATHS:
             await _send_json(send, status=503, body=_DISABLED_BODY)
         else:
             await _send_json(send, status=200, body=_HEALTH_BODY)
