@@ -1,10 +1,16 @@
+# file-under-test: backend/onyx/llm/multi_llm.py
+import hashlib
+import hmac
 import os
 import threading
 import time
+import uuid
 from typing import Any
 from unittest.mock import ANY
+from unittest.mock import Mock
 from unittest.mock import patch
 
+import httpx
 import litellm
 import pytest
 from litellm.types.utils import ChatCompletionDeltaToolCall
@@ -24,6 +30,11 @@ from onyx.llm.models import ReasoningEffort
 from onyx.llm.models import ToolCall
 from onyx.llm.models import UserMessage
 from onyx.llm.multi_llm import LitellmLLM
+from onyx.llm.skybase_llm_proxy import build_skybase_proxy_openai_client
+from onyx.llm.skybase_llm_proxy import create_skybase_proxy_canonical_request
+from onyx.llm.skybase_llm_proxy import SKYBASE_LLM_PROXY_API_KEY_SENTINEL
+from onyx.llm.skybase_llm_proxy import SKYBASE_LLM_PROXY_PATH
+from onyx.llm.skybase_llm_proxy import SkybaseLlmProxyConfigurationError
 from onyx.llm.utils import get_max_input_tokens
 
 VERTEX_OPUS_MODELS_REJECTING_OUTPUT_CONFIG = [
@@ -1746,6 +1757,271 @@ def test_bifrost_normalizes_api_base_in_model_kwargs() -> None:
     assert llm._custom_llm_provider == "openai"
     assert llm._api_base == "https://bifrost.example.com/v1"
     assert llm._model_kwargs["api_base"] == "https://bifrost.example.com/v1"
+
+
+def test_skybase_proxy_uses_nonstreaming_completion_with_a_bound_client() -> None:
+    proxy_environment = {
+        "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+    }
+    with patch.dict(os.environ, proxy_environment, clear=True):
+        llm = LitellmLLM(
+            api_key=SKYBASE_LLM_PROXY_API_KEY_SENTINEL,
+            api_base="http://skybase-server.railway.internal/internal/knowledge/openai",
+            timeout=30,
+            model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+            model_name="knowledge-model",
+            max_input_tokens=32000,
+        )
+
+    mock_client = Mock()
+    nonstream_response = litellm.ModelResponse(
+        id="chatcmpl-skybase-test",
+        created=1_788_000_000,
+        choices=[
+            litellm.Choices(
+                index=0,
+                finish_reason="stop",
+                message={"role": "assistant", "content": "ok"},
+            )
+        ],
+        model="knowledge-model",
+        usage={"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+    )
+    with (
+        patch(
+            "onyx.llm.multi_llm.build_skybase_proxy_openai_client",
+            return_value=mock_client,
+        ) as build_client,
+        patch("litellm.completion", return_value=nonstream_response) as completion,
+    ):
+        response = llm.invoke([UserMessage(content="hello")])
+
+    assert response.choice.message.content == "ok"
+    build_client.assert_called_once_with(llm._skybase_proxy_config, timeout=30)
+    assert completion.call_args.kwargs["stream"] is False
+    assert completion.call_args.kwargs["client"] is mock_client
+    mock_client.close.assert_called_once()
+
+
+def test_skybase_proxy_litellm_path_sends_a_signed_nonstreaming_request() -> None:
+    proxy_environment = {
+        "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+    }
+    with patch.dict(os.environ, proxy_environment, clear=True):
+        llm = LitellmLLM(
+            api_key=SKYBASE_LLM_PROXY_API_KEY_SENTINEL,
+            api_base="http://skybase-server.railway.internal/internal/knowledge/openai",
+            timeout=30,
+            model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+            model_name="knowledge-model",
+            max_input_tokens=32000,
+        )
+
+    captured: list[httpx.Request] = []
+    timestamp = 1_788_000_000
+    nonce = uuid.UUID("7c0e9ec3-9a22-4700-8c68-7ed5ec553a61")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-skybase-test",
+                "created": timestamp,
+                "model": "knowledge-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 5,
+                    "total_tokens": 8,
+                },
+            },
+        )
+
+    config = llm._skybase_proxy_config
+    assert config is not None
+    openai_client = build_skybase_proxy_openai_client(
+        config,
+        timeout=30,
+        inner_transport=httpx.MockTransport(handler),
+        clock=lambda: float(timestamp),
+        nonce_factory=lambda: nonce,
+    )
+    with patch(
+        "onyx.llm.multi_llm.build_skybase_proxy_openai_client",
+        return_value=openai_client,
+    ):
+        response = llm.invoke([UserMessage(content="hello")])
+
+    assert response.choice.message.content == "ok"
+    assert len(captured) == 1
+    request = captured[0]
+    body_sha256 = hashlib.sha256(request.content).hexdigest()
+    canonical = create_skybase_proxy_canonical_request(
+        key_id="primary-key",
+        timestamp=str(timestamp),
+        nonce=str(nonce),
+        body_sha256=body_sha256,
+    )
+    expected_signature = hmac.new(
+        b"test-primary-signing-material", canonical.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    assert request.url.raw_path == SKYBASE_LLM_PROXY_PATH.encode("ascii")
+    assert request.headers["X-Skybase-Body-Sha256"] == body_sha256
+    assert request.headers["X-Skybase-Signature"] == expected_signature
+
+
+def test_skybase_proxy_rejects_streaming_before_litellm_or_network_egress() -> None:
+    proxy_environment = {
+        "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+    }
+    with patch.dict(os.environ, proxy_environment, clear=True):
+        llm = LitellmLLM(
+            api_key=SKYBASE_LLM_PROXY_API_KEY_SENTINEL,
+            api_base="http://skybase-server.railway.internal/internal/knowledge/openai",
+            timeout=30,
+            model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+            model_name="knowledge-model",
+            max_input_tokens=32000,
+        )
+
+    with patch("litellm.completion") as completion:
+        with pytest.raises(SkybaseLlmProxyConfigurationError, match="non-streaming"):
+            list(llm.stream([UserMessage(content="hello")]))
+
+    completion.assert_not_called()
+
+
+def test_skybase_proxy_fails_at_construction_without_hmac_material() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(SkybaseLlmProxyConfigurationError, match="HMAC"):
+            LitellmLLM(
+                api_key=SKYBASE_LLM_PROXY_API_KEY_SENTINEL,
+                api_base="http://skybase-server.railway.internal/internal/knowledge/openai",
+                timeout=30,
+                model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+                model_name="knowledge-model",
+                max_input_tokens=32000,
+            )
+
+
+def test_skybase_proxy_rejects_persisted_custom_configuration() -> None:
+    proxy_environment = {
+        "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+    }
+    with patch.dict(os.environ, proxy_environment, clear=True):
+        with pytest.raises(
+            SkybaseLlmProxyConfigurationError, match="persisted configuration"
+        ):
+            LitellmLLM(
+                api_key=SKYBASE_LLM_PROXY_API_KEY_SENTINEL,
+                api_base="http://skybase-server.railway.internal/internal/knowledge/openai",
+                timeout=30,
+                model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+                model_name="knowledge-model",
+                max_input_tokens=32000,
+                custom_config={"OPENAI_API_KEY": "must-not-persist"},
+            )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"extra_headers": {"X-Untrusted": "value"}},
+        {"extra_body": {"untrusted": True}},
+        {"api_version": "v1"},
+        {"deployment_name": "untrusted-deployment"},
+        {"custom_llm_provider": "untrusted-provider"},
+        {
+            "model_kwargs": {
+                "api_base": "http://skybase-server.railway.internal/internal/knowledge/openai/v1",
+                "untrusted": True,
+            }
+        },
+    ],
+)
+def test_skybase_proxy_rejects_request_override_surfaces(
+    override: dict[str, Any],
+) -> None:
+    proxy_environment = {
+        "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+    }
+    with patch.dict(os.environ, proxy_environment, clear=True):
+        with pytest.raises(
+            SkybaseLlmProxyConfigurationError,
+            match="persisted configuration, request overrides, or model kwargs",
+        ):
+            LitellmLLM(
+                api_key=SKYBASE_LLM_PROXY_API_KEY_SENTINEL,
+                api_base="http://skybase-server.railway.internal/internal/knowledge/openai",
+                timeout=30,
+                model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+                model_name="knowledge-model",
+                max_input_tokens=32000,
+                **override,
+            )
+
+
+def test_shared_profile_rejects_direct_provider_before_litellm() -> None:
+    proxy_environment = {
+        "SKYBASE_ONYX_SHARED_SUPABASE": "true",
+        "SKYBASE_LLM_PROXY_BASE_URL": "http://skybase-server.railway.internal/internal/knowledge/openai/v1",
+        "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+        "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+    }
+    with patch.dict(os.environ, proxy_environment, clear=True):
+        with pytest.raises(SkybaseLlmProxyConfigurationError, match="deployment-owned"):
+            LitellmLLM(
+                api_key="upstream-provider-key",
+                api_base="https://api.openai.com/v1",
+                timeout=30,
+                model_provider=LlmProviderNames.OPENAI,
+                model_name="knowledge-model",
+                max_input_tokens=32000,
+            )
+
+
+def test_normal_openai_compatible_provider_retains_streaming_behavior() -> None:
+    llm = LitellmLLM(
+        api_key="ordinary-provider-key",
+        api_base="https://normal-proxy.example.test",
+        timeout=30,
+        model_provider=LlmProviderNames.OPENAI_COMPATIBLE,
+        model_name="knowledge-model",
+        max_input_tokens=32000,
+    )
+    stream_chunks = [
+        litellm.ModelResponse(
+            id="chatcmpl-normal-proxy",
+            choices=[
+                litellm.Choices(
+                    delta=_create_delta(role="assistant", content="ok"),
+                    finish_reason="stop",
+                    index=0,
+                )
+            ],
+            model="knowledge-model",
+        )
+    ]
+
+    with patch("litellm.completion", return_value=stream_chunks) as completion:
+        response = llm.invoke([UserMessage(content="hello")])
+
+    assert response.choice.message.content == "ok"
+    assert llm._skybase_proxy_config is None
+    assert completion.call_args.kwargs["stream"] is True
+    assert completion.call_args.kwargs["client"] is None
 
 
 def test_prompt_contains_tool_call_history_true() -> None:

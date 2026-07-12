@@ -50,10 +50,13 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/db/engine/async_sql_engine.py"
     "backend/onyx/db/engine/connection_warmup.py"
     "backend/onyx/db/engine/sql_engine.py"
+    "backend/onyx/db/llm.py"
     "backend/onyx/db/skybase_shared_supabase.py"
     "backend/onyx/file_store/file_store.py"
     "backend/onyx/kg/clustering/clustering.py"
     "backend/onyx/kg/clustering/normalizations.py"
+    "backend/onyx/llm/multi_llm.py"
+    "backend/onyx/llm/skybase_llm_proxy.py"
     "backend/onyx/main.py"
     "backend/onyx/server/features/search/api.py"
     "backend/onyx/server/features/search/models.py"
@@ -64,6 +67,8 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "backend/onyx/tools/tool_implementations/utils.py"
     "backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py"
     "backend/tests/unit/onyx/server/features/search/test_programmatic_search_response.py"
+    "backend/tests/unit/onyx/llm/test_multi_llm.py"
+    "backend/tests/unit/onyx/llm/test_skybase_llm_proxy.py"
     "backend/tests/unit/onyx/test_shared_supabase_health.py"
     "backend/tests/unit/onyx/tools/test_programmatic_search_results.py"
     "backend/tests/unit/onyx/tools/tool_implementations/search/test_programmatic_search_handoff.py"
@@ -207,9 +212,10 @@ require_fixed_line "${PROVENANCE_FILE}" "- Upstream release tag: \`${EXPECTED_UP
 require_fixed_line "${PROVENANCE_FILE}" "- Upstream commit: \`${EXPECTED_UPSTREAM_COMMIT}\`"
 require_fixed_line "${PROVENANCE_FILE}" "- Upstream source tree: \`${EXPECTED_UPSTREAM_TREE}\`"
 require_fixed_line "${REQUIREMENTS_FILE}" "-r default.txt"
-require_fixed_line "${PROVENANCE_FILE}" "- Onyx receives no provider, connector, identity, storage, or telemetry"
-require_fixed_line "${PROVENANCE_FILE}" "  secrets. The profile accepts only the two generated database passwords and"
-require_fixed_line "${PROVENANCE_FILE}" "  LiteLLM HTTP boundary. Private Railway networking alone does not prove that"
+require_fixed_line "${PROVENANCE_FILE}" "- Onyx receives no upstream provider, connector, identity, storage, or"
+require_fixed_line "${PROVENANCE_FILE}" "  telemetry secrets. The profile accepts only the generated database passwords"
+require_fixed_line "${PROVENANCE_FILE}" "  and the exact private-proxy HMAC signing material listed below."
+require_fixed_line "${PROVENANCE_FILE}" "  non-streaming only. Task 11 must still provision deployment-network egress"
 require_fixed_line "${PROVENANCE_FILE}" "- PostgreSQL extension availability is a branch-bootstrap preflight:"
 
 non_comment_requirements="$(grep -Ev '^[[:space:]]*(#.*)?$' "${REQUIREMENTS_FILE}" || true)"
@@ -348,6 +354,8 @@ grep -Fq -- 'Shared profile: skipped direct object-storage migration.' "${C9E2_F
     fail "c9e2 lacks the fail-closed no-S3 migration path"
 
 readonly CONTRACT_FILE="${REPO_ROOT}/backend/onyx/db/skybase_shared_supabase.py"
+readonly LLM_PROXY_FILE="${REPO_ROOT}/backend/onyx/llm/skybase_llm_proxy.py"
+readonly LLM_PROVIDER_DB_FILE="${REPO_ROOT}/backend/onyx/db/llm.py"
 readonly SYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/sql_engine.py"
 readonly ASYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/async_sql_engine.py"
 readonly WARMUP_FILE="${REPO_ROOT}/backend/onyx/db/engine/connection_warmup.py"
@@ -371,12 +379,38 @@ for contract_line in \
     'rolbypassrls' \
     'pg_catalog.pg_auth_members' \
     'has_table_privilege' \
-    'PROFILE_NON_SECRET_ENV_ALLOWLIST: Final = frozenset({"HF_HUB_DISABLE_TELEMETRY"})' \
+    'PROFILE_NON_SECRET_ENV_ALLOWLIST: Final = frozenset(' \
+    'SKYBASE_LLM_PROXY_BASE_URL_ENV: Final = "SKYBASE_LLM_PROXY_BASE_URL"' \
+    'SKYBASE_LLM_PROXY_API_KEY_SENTINEL: Final = "skybase-private-proxy"' \
+    'assert_shared_llm_provider_configuration' \
     'SHARED_PROFILE_ALLOWED_PATHS: Final = frozenset({"/health"})' \
-    'The shared-Supabase profile accepts only its reviewed database'; do
+    'The shared-Supabase profile accepts only reviewed database'; do
     grep -Fq -- "${contract_line}" "${CONTRACT_FILE}" || \
         fail "shared contract is missing: ${contract_line}"
 done
+for proxy_contract_line in \
+    'SKYBASE_LLM_PROXY_PATH = f"{SKYBASE_LLM_PROXY_BASE_PATH}/chat/completions"' \
+    'SKYBASE_LLM_HMAC_PRIMARY_ID_ENV = "SKYBASE_LLM_HMAC_PRIMARY_ID"' \
+    'SKYBASE_LLM_HMAC_PRIMARY_KEY_ENV = "SKYBASE_LLM_HMAC_PRIMARY_KEY"' \
+    'SKYBASE_LLM_HMAC_NEXT_ID_ENV = "SKYBASE_LLM_HMAC_NEXT_ID"' \
+    'SKYBASE_LLM_HMAC_NEXT_KEY_ENV = "SKYBASE_LLM_HMAC_NEXT_KEY"'; do
+    grep -Fq -- "${proxy_contract_line}" "${LLM_PROXY_FILE}" || \
+        fail "Skybase LLM proxy contract is missing: ${proxy_contract_line}"
+done
+grep -Fq -- 'assert_shared_llm_provider_configuration(' "${LLM_PROVIDER_DB_FILE}" || \
+    fail "LLM provider persistence must enforce the shared proxy contract"
+grep -Fq -- 'get_shared_llm_proxy_base' "${LLM_PROXY_FILE}" || \
+    fail "LLM proxy signer must bind to the shared deployment-owned base URL"
+for hmac_env_name in \
+    '"SKYBASE_LLM_HMAC_PRIMARY_ID"' \
+    '"SKYBASE_LLM_HMAC_PRIMARY_KEY"' \
+    '"SKYBASE_LLM_HMAC_NEXT_ID"' \
+    '"SKYBASE_LLM_HMAC_NEXT_KEY"'; do
+    grep -Fq -- "${hmac_env_name}" "${CONTRACT_FILE}" || \
+        fail "shared profile is missing reviewed HMAC environment name: ${hmac_env_name}"
+done
+grep -Fq -- '"SKYBASE_LLM_PROXY_BASE_URL"' "${CONTRACT_FILE}" || \
+    fail "shared profile is missing the reviewed private proxy base environment name"
 for engine_file in "${SYNC_ENGINE_FILE}" "${ASYNC_ENGINE_FILE}"; do
     grep -Fq -- 'shared_search_path' "${engine_file}" || \
         fail "engine does not enforce the shared search path: ${engine_file}"
@@ -473,6 +507,9 @@ done
 grep -Fq -- '# file-under-test: backend/onyx/db/skybase_shared_supabase.py' \
     "${REPO_ROOT}/backend/tests/unit/onyx/db/engine/test_skybase_db_contract.py" || \
     fail "contract test must name its file under test"
+grep -Fq -- '# file-under-test: backend/onyx/llm/multi_llm.py' \
+    "${REPO_ROOT}/backend/tests/unit/onyx/llm/test_multi_llm.py" || \
+    fail "LiteLLM proxy tests must name their file under test"
 grep -Fq -- '# file-under-test: scripts/render-skybase-supabase-env.py' \
     "${REPO_ROOT}/backend/tests/unit/scripts/test_skybase_supabase_scripts.py" || \
     fail "renderer test must name its file under test"

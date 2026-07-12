@@ -45,7 +45,7 @@ when the dependency lock changes.
 - Source connector credentials, user identity, authorization, audit records,
   public API exposure, and action execution. Skybase owns those controls.
 
-## T2 Overlay Allowlist
+## Reviewed Overlay Allowlist
 
 The shared-Supabase contract expands the reviewed overlay to the following CE
 paths only. No Enterprise source, `alembic_tenants`, or copied EE behavior is
@@ -66,6 +66,9 @@ permitted.
   `backend/onyx/db/engine/connection_warmup.py`,
   `backend/onyx/configs/app_configs.py`, and
   `backend/onyx/configs/constants.py`.
+- The private LLM proxy client paths: `backend/onyx/llm/multi_llm.py` and
+  `backend/onyx/llm/skybase_llm_proxy.py`, plus the shared-profile LLM
+  provider persistence gate in `backend/onyx/db/llm.py`.
 - The eight audited CE migrations, `backend/alembic/env.py`, the two KG
   trigram call sites, the bounded Celery app/configuration paths, and the
   v1 FileStore/native-surface gates.
@@ -75,8 +78,9 @@ permitted.
   `backend/onyx/tools/tool_implementations/search/search_tool.py`, and
   `backend/onyx/server/features/search/{api,models}.py`, plus the CLI raw
   response paths `cli/{cmd/search.go,cmd/search_test.go,internal/models/models.go,internal/api/client_test.go}`.
-- Focused contract tests under `backend/tests/unit/onyx/db/engine/` and
-  `backend/tests/unit/scripts/`, plus the T5C programmatic-search tests.
+- Focused contract tests under `backend/tests/unit/onyx/db/engine/`,
+  `backend/tests/unit/onyx/llm/`, and `backend/tests/unit/scripts/`, plus
+  the T5C programmatic-search tests.
 
 The verifier checks the pinned-commit-to-HEAD diff, tracked working-tree
 changes, and both ordinary and ignored untracked files against this exact
@@ -121,16 +125,32 @@ later task may expand the allowlist only through a reviewed contract update.
 
 ## Provider And Database Boundaries
 
-- Onyx receives no provider, connector, identity, storage, or telemetry
-  secrets. The profile accepts only the two generated database passwords and
-  rejects secret-shaped variables and native service namespaces, including
-  OpenRouter. HF_HUB_DISABLE_TELEMETRY is the sole non-secret library flag
-  allowed because upstream sets it to disable telemetry while loading CE
-  migrations. A later configuration slice must introduce a reviewed Skybase
-  proxy contract instead of relaxing this boundary.
-- A later request-transport slice must calculate an exact-body HMAC at the
-  LiteLLM HTTP boundary. Private Railway networking alone does not prove that
-  direct provider egress is blocked.
+- Onyx receives no upstream provider, connector, identity, storage, or
+  telemetry secrets. The profile accepts only the generated database passwords
+  and the exact private-proxy HMAC signing material listed below.
+  It rejects all other secret-shaped variables and native service namespaces,
+  including OpenRouter.
+  `HF_HUB_DISABLE_TELEMETRY` is the sole non-secret library flag allowed because
+  upstream sets it to disable telemetry while loading CE migrations.
+- The additional private-proxy environment names are the deployment-owned,
+  non-secret `SKYBASE_LLM_PROXY_BASE_URL`, `SKYBASE_LLM_HMAC_PRIMARY_ID`,
+  `SKYBASE_LLM_HMAC_PRIMARY_KEY`, and optional paired
+  `SKYBASE_LLM_HMAC_NEXT_ID`, `SKYBASE_LLM_HMAC_NEXT_KEY`. The base URL is an
+  exact private `*.railway.internal/internal/knowledge/openai/v1` route, not a
+  provider-row-selected suffix match. HMAC values are read only by the private
+  transport, never persisted to Onyx tables, and never logged. The signer
+  always uses primary. Rotation is bounded: add next on both Skybase and Onyx,
+  promote it to primary, then explicitly remove the old key after the overlap
+  window.
+- In the shared profile, provider persistence and runtime construction accept
+  only `openai_compatible`, the exact deployment-owned proxy base URL, and the
+  literal non-secret `skybase-private-proxy` sentinel. Persisted custom config,
+  upstream provider keys, and direct provider bases are rejected. The transport
+  signs the final serialized `POST /internal/knowledge/openai/v1/chat/completions`
+  bytes with timestamp, UUID nonce, SHA-256 body digest, and HMAC-SHA256. It
+  rejects streaming before egress because the initial proxy contract is
+  non-streaming only. Task 11 must still provision deployment-network egress
+  enforcement; this CE contract does not claim that network policy exists yet.
 - PostgreSQL extension availability is a branch-bootstrap preflight:
   `pg_trgm` must already be in `extensions` and `pgcrypto` in `public`. This
   CE image never creates global extensions.

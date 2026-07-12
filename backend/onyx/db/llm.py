@@ -20,6 +20,7 @@ from onyx.db.models import SearchSettings
 from onyx.db.models import Tool as ToolModel
 from onyx.db.models import User
 from onyx.db.models import User__UserGroup
+from onyx.db.skybase_shared_supabase import assert_shared_llm_provider_configuration
 from onyx.llm.utils import model_supports_image_input
 from onyx.llm.well_known_providers.auto_update_models import LLMRecommendations
 from onyx.server.manage.embedding.models import CloudEmbeddingProvider
@@ -214,6 +215,16 @@ def upsert_llm_provider(
     llm_provider_upsert_request: LLMProviderUpsertRequest,
     db_session: Session,
 ) -> LLMProviderView:
+    assert_shared_llm_provider_configuration(
+        provider=llm_provider_upsert_request.provider,
+        api_key=llm_provider_upsert_request.api_key,
+        api_base=llm_provider_upsert_request.api_base,
+        api_version=llm_provider_upsert_request.api_version,
+        custom_config=llm_provider_upsert_request.custom_config,
+        deployment_name=llm_provider_upsert_request.deployment_name,
+        is_auto_mode=llm_provider_upsert_request.is_auto_mode,
+    )
+
     existing_llm_provider: LLMProviderModel | None = None
     if llm_provider_upsert_request.id:
         existing_llm_provider = fetch_existing_llm_provider_by_id(

@@ -7,12 +7,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
 from onyx.db.skybase_shared_supabase import assert_pool_request
 from onyx.db.skybase_shared_supabase import assert_search_path
+from onyx.db.skybase_shared_supabase import assert_shared_llm_provider_configuration
 from onyx.db.skybase_shared_supabase import assert_shared_migration_preconditions
 from onyx.db.skybase_shared_supabase import assert_worker_app_allowed
 from onyx.db.skybase_shared_supabase import is_disabled_native_surface
@@ -22,6 +24,7 @@ from onyx.db.skybase_shared_supabase import validate_shared_supabase_contract
 from onyx.file_store.file_store import DisabledFileStore
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.file_store import get_s3_file_store
+from onyx.server.manage.llm.models import LLMProviderUpsertRequest
 
 
 def _profile_env(tmp_path: Path, *, role_profile: str = "runtime") -> dict[str, str]:
@@ -72,6 +75,104 @@ def test_runtime_profile_allows_the_safe_huggingface_telemetry_disable_flag(
     validate_shared_supabase_contract(environment)
 
 
+def test_runtime_profile_allows_only_the_reviewed_proxy_hmac_key_names(
+    tmp_path: Path,
+) -> None:
+    environment = _profile_env(tmp_path)
+    environment.update(
+        {
+            "SKYBASE_LLM_HMAC_PRIMARY_ID": "primary-key",
+            "SKYBASE_LLM_HMAC_PRIMARY_KEY": "test-primary-signing-material",
+            "SKYBASE_LLM_HMAC_NEXT_ID": "next-key",
+            "SKYBASE_LLM_HMAC_NEXT_KEY": "test-next-signing-material",
+        }
+    )
+    validate_shared_supabase_contract(environment)
+
+    environment["SKYBASE_LLM_HMAC_UNRELATED_KEY"] = "not-allowed"
+    with pytest.raises(SharedSupabaseContractError, match="forbidden"):
+        validate_shared_supabase_contract(environment)
+
+    environment.pop("SKYBASE_LLM_HMAC_UNRELATED_KEY")
+    environment["SKYBASE_LLM_HMAC_UNRELATED_ID"] = "not-allowed"
+    with pytest.raises(SharedSupabaseContractError, match="forbidden"):
+        validate_shared_supabase_contract(environment)
+
+
+def test_runtime_profile_rejects_partial_proxy_rotation_configuration(
+    tmp_path: Path,
+) -> None:
+    environment = _profile_env(tmp_path)
+    environment["SKYBASE_LLM_HMAC_NEXT_ID"] = "next-key"
+
+    with pytest.raises(SharedSupabaseContractError, match="NEXT_ID.*NEXT_KEY"):
+        validate_shared_supabase_contract(environment)
+
+
+def test_shared_profile_requires_the_governed_llm_provider_contract(
+    tmp_path: Path,
+) -> None:
+    environment = _profile_env(tmp_path)
+    proxy_base = "http://skybase-server.railway.internal/internal/knowledge/openai/v1"
+    environment["SKYBASE_LLM_PROXY_BASE_URL"] = proxy_base
+
+    assert_shared_llm_provider_configuration(
+        provider="openai_compatible",
+        api_key="skybase-private-proxy",
+        api_base=proxy_base,
+        api_version=None,
+        custom_config=None,
+        deployment_name=None,
+        is_auto_mode=False,
+        env=environment,
+    )
+
+    with pytest.raises(SharedSupabaseContractError, match="deployment-owned"):
+        assert_shared_llm_provider_configuration(
+            provider="openai_compatible",
+            api_key="skybase-private-proxy",
+            api_base="http://attacker.railway.internal/internal/knowledge/openai/v1",
+            api_version=None,
+            custom_config=None,
+            deployment_name=None,
+            is_auto_mode=False,
+            env=environment,
+        )
+
+    with pytest.raises(SharedSupabaseContractError, match="never stores upstream"):
+        assert_shared_llm_provider_configuration(
+            provider="openai_compatible",
+            api_key="upstream-provider-key",
+            api_base=proxy_base,
+            api_version=None,
+            custom_config=None,
+            deployment_name=None,
+            is_auto_mode=False,
+            env=environment,
+        )
+
+
+def test_shared_profile_blocks_direct_provider_before_db_write(tmp_path: Path) -> None:
+    environment = _profile_env(tmp_path)
+    environment["SKYBASE_LLM_PROXY_BASE_URL"] = (
+        "http://skybase-server.railway.internal/internal/knowledge/openai/v1"
+    )
+    request = LLMProviderUpsertRequest(
+        provider="openai",
+        api_key="upstream-provider-key",
+        api_base="https://api.openai.com/v1",
+    )
+    db_session = MagicMock()
+
+    from onyx.db.llm import upsert_llm_provider
+
+    with patch.dict(os.environ, environment, clear=True):
+        with pytest.raises(SharedSupabaseContractError, match="governed"):
+            upsert_llm_provider(request, db_session)
+
+    db_session.add.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
@@ -88,6 +189,11 @@ def test_runtime_profile_allows_the_safe_huggingface_telemetry_disable_flag(
         ("GITHUB_PERSONAL_ACCESS_TOKEN", "not-allowed", "forbidden"),
         ("SENTRY_DSN", "not-allowed", "forbidden"),
         ("LITELLM_API_BASE", "not-allowed", "forbidden"),
+        (
+            "SKYBASE_LLM_PROXY_BASE_URL",
+            "https://api.openai.com/v1",
+            "SKYBASE_LLM_PROXY_BASE_URL",
+        ),
         ("OTEL_EXPORTER_OTLP_HEADERS", "not-allowed", "forbidden"),
     ],
 )
