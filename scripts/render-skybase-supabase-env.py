@@ -15,6 +15,7 @@ import re
 import secrets
 import stat
 from pathlib import Path
+from typing import Final
 from urllib.parse import quote
 from urllib.parse import unquote
 from urllib.parse import urlsplit
@@ -24,6 +25,12 @@ _PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _SAFE_ENV_VALUE = re.compile(r"^[^\r\n=]+$")
 _EXPECTED_MODE = 0o600
+# CE v4.3.1 has no caller for the readonly engine. Its historical KG view
+# path is commented out and granted filtered views per request rather than
+# base tables. Keep the v1 data allowlist intentionally empty until a Skybase
+# adapter defines permission-filtered retrieval views.
+KG_READONLY_TABLE_ALLOWLIST: Final[tuple[str, ...]] = ()
+KG_READONLY_SEQUENCE_ALLOWLIST: Final[tuple[str, ...]] = ()
 
 
 def _mode(path: Path) -> int:
@@ -189,10 +196,15 @@ BEGIN
         CREATE ROLE skybase_onyx_kg_ro LOGIN PASSWORD '__READONLY_PASSWORD__';
     END IF;
 END $$;
-ALTER ROLE skybase_onyx_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 1;
-ALTER ROLE skybase_onyx_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 12;
-ALTER ROLE skybase_onyx_kg_ro LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 1;
+ALTER ROLE skybase_onyx_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 PASSWORD '__MIGRATOR_PASSWORD__';
+ALTER ROLE skybase_onyx_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 12 PASSWORD '__RUNTIME_PASSWORD__';
+ALTER ROLE skybase_onyx_kg_ro LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 1 PASSWORD '__READONLY_PASSWORD__';
 CREATE SCHEMA IF NOT EXISTS skybase_onyx AUTHORIZATION skybase_onyx_migrator;
+ALTER SCHEMA skybase_onyx OWNER TO skybase_onyx_migrator;
+REVOKE CREATE ON SCHEMA public FROM skybase_onyx_migrator, skybase_onyx_runtime, skybase_onyx_kg_ro;
+REVOKE CREATE ON SCHEMA extensions FROM skybase_onyx_migrator, skybase_onyx_runtime, skybase_onyx_kg_ro;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM skybase_onyx_migrator, skybase_onyx_runtime, skybase_onyx_kg_ro;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM skybase_onyx_migrator, skybase_onyx_runtime, skybase_onyx_kg_ro;
 GRANT USAGE ON SCHEMA extensions TO skybase_onyx_migrator, skybase_onyx_runtime, skybase_onyx_kg_ro;
 GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO skybase_onyx_migrator, skybase_onyx_runtime;
 """
@@ -206,20 +218,31 @@ GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO skybase_onyx_migrator, sky
 def _post_migrate_grants_sql() -> str:
     """Return schema-local grants applied only after a successful upgrade."""
 
+    readonly_table_grants = "\n".join(
+        f"GRANT SELECT ON TABLE {table} TO skybase_onyx_kg_ro;"
+        for table in KG_READONLY_TABLE_ALLOWLIST
+    )
+    readonly_sequence_grants = "\n".join(
+        f"GRANT USAGE, SELECT ON SEQUENCE {sequence} TO skybase_onyx_kg_ro;"
+        for sequence in KG_READONLY_SEQUENCE_ALLOWLIST
+    )
+    static_readonly_grants = "\n".join(
+        grant for grant in (readonly_table_grants, readonly_sequence_grants) if grant
+    )
     return """GRANT USAGE ON SCHEMA skybase_onyx TO skybase_onyx_runtime, skybase_onyx_kg_ro;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA skybase_onyx TO skybase_onyx_runtime;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA skybase_onyx TO skybase_onyx_runtime;
-GRANT SELECT ON ALL TABLES IN SCHEMA skybase_onyx TO skybase_onyx_kg_ro;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA skybase_onyx TO skybase_onyx_kg_ro;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA skybase_onyx FROM skybase_onyx_kg_ro;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA skybase_onyx FROM skybase_onyx_kg_ro;
 ALTER DEFAULT PRIVILEGES FOR ROLE skybase_onyx_migrator IN SCHEMA skybase_onyx
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO skybase_onyx_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE skybase_onyx_migrator IN SCHEMA skybase_onyx
     GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO skybase_onyx_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE skybase_onyx_migrator IN SCHEMA skybase_onyx
-    GRANT SELECT ON TABLES TO skybase_onyx_kg_ro;
+    REVOKE ALL ON TABLES FROM skybase_onyx_kg_ro;
 ALTER DEFAULT PRIVILEGES FOR ROLE skybase_onyx_migrator IN SCHEMA skybase_onyx
-    GRANT USAGE, SELECT ON SEQUENCES TO skybase_onyx_kg_ro;
-"""
+    REVOKE ALL ON SEQUENCES FROM skybase_onyx_kg_ro;
+""" + (f"{static_readonly_grants}\n" if static_readonly_grants else "")
 
 
 def main() -> int:

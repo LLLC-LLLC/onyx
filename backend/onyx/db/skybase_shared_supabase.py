@@ -18,6 +18,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 from sqlalchemy import text
@@ -31,6 +32,11 @@ MIGRATOR_ROLE: Final = "skybase_onyx_migrator"
 READONLY_ROLE: Final = "skybase_onyx_kg_ro"
 SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"
 MAX_RUNTIME_CONNECTIONS: Final = 12
+ROLE_CONNECTION_LIMITS: Final = {
+    RUNTIME_ROLE: MAX_RUNTIME_CONNECTIONS,
+    MIGRATOR_ROLE: 1,
+    READONLY_ROLE: 1,
+}
 ALLOWED_WORKER_APPS: Final = frozenset({"docfetching", "docprocessing"})
 DENIED_WORKER_APPS: Final = frozenset(
     {
@@ -44,6 +50,77 @@ DENIED_WORKER_APPS: Final = frozenset(
         "client",
     }
 )
+
+# The profile permits only its two database passwords. Everything matching a
+# credential-shaped key or a provider/connector/telemetry namespace is refused
+# before the normal Onyx configuration module can consume it. This remains
+# intentionally broad because connector and provider configuration are owned by
+# Skybase, not by the CE runtime.
+PROFILE_SECRET_ENV_ALLOWLIST: Final = frozenset(
+    {"POSTGRES_PASSWORD", "DB_READONLY_PASSWORD"}
+)
+FORBIDDEN_SECRET_ENV_TOKENS: Final = frozenset(
+    {
+        "CREDENTIAL",
+        "DSN",
+        "PASSWORD",
+        "SECRET",
+        "TOKEN",
+    }
+)
+FORBIDDEN_NATIVE_ENV_PREFIXES: Final = (
+    "AIRTABLE_",
+    "AMPLITUDE_",
+    "ANTHROPIC_",
+    "AWS_",
+    "AZURE_",
+    "AZURE_OPENAI_",
+    "AZURE_STORAGE_",
+    "BEDROCK_",
+    "CEREBRAS_",
+    "COHERE_",
+    "CONNECTOR_",
+    "DATABRICKS_",
+    "DATADOG_",
+    "DEEPSEEK_",
+    "FIRECRAWL_",
+    "FIREWORKS_",
+    "GCS_",
+    "GITHUB_",
+    "GOOGLE_",
+    "GROQ_",
+    "HF_",
+    "HONEYCOMB_",
+    "HUGGINGFACE_",
+    "LANGFUSE_",
+    "LANGSMITH_",
+    "LITELLM_",
+    "MISTRAL_",
+    "MINIO_",
+    "MIXPANEL_",
+    "NEW_RELIC_",
+    "NOTION_",
+    "OAUTH_",
+    "OIDC_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "OTEL_",
+    "PERPLEXITY_",
+    "POSTHOG_",
+    "PROVIDER_",
+    "S3_",
+    "SAML_",
+    "SCIM_",
+    "SEGMENT_",
+    "SENTRY_",
+    "SLACK_",
+    "TELEMETRY_",
+    "TOGETHER_",
+    "VERTEX_",
+    "VOYAGE_",
+    "XAI_",
+)
+SHARED_PROFILE_ALLOWED_PATHS: Final = frozenset({"/health"})
 
 
 class SharedSupabaseContractError(RuntimeError):
@@ -136,28 +213,46 @@ def _assert_no_direct_object_storage(env: Mapping[str, str]) -> None:
     _require(env, "FILE_STORE_BACKEND", "disabled")
 
 
-def _assert_no_native_credentials(env: Mapping[str, str]) -> None:
-    direct_values = sorted(
-        name
-        for name in (
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_DEFAULT_API_KEY",
-            "COHERE_API_KEY",
-            "COHERE_DEFAULT_API_KEY",
-            "ENCRYPTION_KEY_SECRET",
-            "GEN_AI_API_KEY",
-            "GOOGLE_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENAI_DEFAULT_API_KEY",
-            "VERTEXAI_DEFAULT_CREDENTIALS",
-            "VOYAGE_API_KEY",
+def _is_forbidden_native_environment_name(name: str) -> bool:
+    """Return whether a populated variable could configure a native secret surface."""
+
+    normalized = name.upper()
+    if normalized in PROFILE_SECRET_ENV_ALLOWLIST:
+        return False
+    tokens = frozenset(normalized.split("_"))
+    return (
+        normalized.startswith(FORBIDDEN_NATIVE_ENV_PREFIXES)
+        or bool(tokens & FORBIDDEN_SECRET_ENV_TOKENS)
+        or (
+            {"API", "KEY"}.issubset(tokens)
+            or {"API", "BASE"}.issubset(tokens)
+            or {"ACCESS", "KEY"}.issubset(tokens)
+            or {"CLIENT", "SECRET"}.issubset(tokens)
+            or {"PRIVATE", "KEY"}.issubset(tokens)
         )
-        if (env.get(name) or "").strip()
     )
-    if direct_values:
+
+
+def _assert_no_native_credentials(env: Mapping[str, str]) -> None:
+    """Fail closed for provider, connector, identity, storage, and telemetry inputs.
+
+    The runtime necessarily inherits ordinary host variables such as ``PATH`` and
+    ``LANG``, so this is a security allowlist for *secret-shaped and native
+    service namespaces*, not a brittle allowlist of every POSIX environment
+    variable. The two reviewed database passwords are the only populated
+    credential values accepted by this profile.
+    """
+
+    configured = sorted(
+        name
+        for name, value in env.items()
+        if value.strip() and _is_forbidden_native_environment_name(name)
+    )
+    if configured:
         raise SharedSupabaseContractError(
-            "The shared-Supabase profile accepts no native provider or credential "
-            f"secrets: {', '.join(direct_values)}. Use the Skybase proxy later."
+            "The shared-Supabase profile accepts only its reviewed database "
+            "passwords; native provider, connector, identity, storage, and "
+            f"telemetry inputs are forbidden: {', '.join(configured)}."
         )
 
 
@@ -302,6 +397,139 @@ def assert_search_path(value: str | None) -> None:
         )
 
 
+def _row_mapping(row: object, *, context: str) -> Mapping[str, Any]:
+    """Get a SQLAlchemy result mapping while rejecting unstructured test doubles."""
+
+    candidate = getattr(row, "_mapping", row)
+    if not isinstance(candidate, Mapping):
+        raise SharedSupabaseContractError(
+            f"Shared-profile precondition returned an invalid {context} row."
+        )
+    return candidate
+
+
+def _assert_role_security_attributes(execute: Any, role: str, connlimit: int) -> None:
+    row = execute(
+        text(
+            "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreaterole, "
+            "rolcreatedb, rolreplication, rolbypassrls, rolconnlimit "
+            "FROM pg_catalog.pg_roles WHERE rolname = :role"
+        ),
+        {"role": role},
+    ).fetchone()
+    if row is None:
+        raise SharedSupabaseContractError(
+            f"Required pre-managed shared-profile role {role!r} does not exist."
+        )
+    actual = _row_mapping(row, context="role")
+    expected: Mapping[str, Any] = {
+        "rolcanlogin": True,
+        "rolinherit": False,
+        "rolsuper": False,
+        "rolcreaterole": False,
+        "rolcreatedb": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+        "rolconnlimit": connlimit,
+    }
+    for field, expected_value in expected.items():
+        if actual.get(field) != expected_value:
+            raise SharedSupabaseContractError(
+                f"Role {role!r} must have {field}={expected_value!r}; "
+                f"got {actual.get(field)!r}."
+            )
+
+    membership = execute(
+        text(
+            "SELECT parent.rolname AS parent_role, member.rolname AS member_role "
+            "FROM pg_catalog.pg_auth_members AS membership "
+            "JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid "
+            "JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member "
+            "WHERE parent.rolname = :role OR member.rolname = :role LIMIT 1"
+        ),
+        {"role": role},
+    ).fetchone()
+    if membership is not None:
+        values = _row_mapping(membership, context="role membership")
+        raise SharedSupabaseContractError(
+            f"Role {role!r} must have no role memberships; found "
+            f"{values.get('member_role')!r} in {values.get('parent_role')!r}."
+        )
+
+
+def _assert_no_protected_schema_create(execute: Any, role: str) -> None:
+    row = execute(
+        text(
+            "SELECT protected_schema.schema_name "
+            "FROM (VALUES ('public'), ('extensions')) "
+            "AS protected_schema(schema_name) "
+            "WHERE has_schema_privilege(:role, protected_schema.schema_name, 'CREATE') "
+            "LIMIT 1"
+        ),
+        {"role": role},
+    ).fetchone()
+    if row is not None:
+        protected_schema = _row_mapping(row, context="protected schema").get(
+            "schema_name"
+        )
+        raise SharedSupabaseContractError(
+            f"Role {role!r} must not have CREATE on protected schema "
+            f"{protected_schema!r}."
+        )
+
+
+def _assert_no_public_table_privileges(execute: Any, role: str) -> None:
+    row = execute(
+        text(
+            "SELECT relation.relname, privilege.privilege_name "
+            "FROM pg_catalog.pg_class AS relation "
+            "JOIN pg_catalog.pg_namespace AS namespace "
+            "ON namespace.oid = relation.relnamespace "
+            "CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), "
+            "('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) "
+            "AS privilege(privilege_name) "
+            "WHERE namespace.nspname = 'public' "
+            "AND relation.relkind IN ('r', 'p', 'v', 'm', 'f') "
+            "AND has_table_privilege(:role, relation.oid, privilege.privilege_name) "
+            "LIMIT 1"
+        ),
+        {"role": role},
+    ).fetchone()
+    if row is not None:
+        values = _row_mapping(row, context="public table privilege")
+        raise SharedSupabaseContractError(
+            f"Role {role!r} must not have public-table privileges; found "
+            f"{values.get('privilege_name')!r} on {values.get('relname')!r}."
+        )
+
+
+def _assert_shared_role_and_schema_contract(execute: Any) -> None:
+    for role, connlimit in ROLE_CONNECTION_LIMITS.items():
+        _assert_role_security_attributes(execute, role, connlimit)
+        _assert_no_protected_schema_create(execute, role)
+        _assert_no_public_table_privileges(execute, role)
+
+    owner = execute(
+        text(
+            "SELECT role.rolname AS owner_role "
+            "FROM pg_catalog.pg_namespace AS namespace "
+            "JOIN pg_catalog.pg_roles AS role ON role.oid = namespace.nspowner "
+            "WHERE namespace.nspname = :schema"
+        ),
+        {"schema": SHARED_SCHEMA},
+    ).fetchone()
+    actual_owner = (
+        _row_mapping(owner, context="schema owner").get("owner_role")
+        if owner is not None
+        else None
+    )
+    if actual_owner != MIGRATOR_ROLE:
+        raise SharedSupabaseContractError(
+            f"Schema {SHARED_SCHEMA!r} must be owned by {MIGRATOR_ROLE!r}; "
+            f"got {actual_owner!r}."
+        )
+
+
 def assert_shared_migration_preconditions(bind: object) -> None:
     """Verify shared resources without creating or modifying global objects."""
 
@@ -335,15 +563,7 @@ def assert_shared_migration_preconditions(bind: object) -> None:
                 f"schema {expected_schema!r}; got {actual!r}."
             )
 
-    for role in (RUNTIME_ROLE, MIGRATOR_ROLE, READONLY_ROLE):
-        row = execute(
-            text("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname = :role"),
-            {"role": role},
-        ).fetchone()
-        if row is None:
-            raise SharedSupabaseContractError(
-                f"Required pre-managed shared-profile role {role!r} does not exist."
-            )
+    _assert_shared_role_and_schema_contract(execute)
 
     current_path = execute(text("SHOW search_path")).scalar()
     assert_search_path(str(current_path) if current_path is not None else None)
@@ -356,42 +576,9 @@ def native_surface_enabled() -> bool:
 
 
 def is_disabled_native_surface(path: str) -> bool:
-    """Return whether a native CE v1 endpoint could mutate Skybase-owned data.
-
-    The shared profile keeps Onyx behind Skybase's private boundary.  Cited
-    retrieval is introduced by a later adapter; native credential, identity,
-    upload, chat, tenant, tool, and FileStore routes are not a public shortcut
-    around that boundary.
-    """
+    """Default-deny every native HTTP route except the health probe in v1."""
 
     if native_surface_enabled():
         return False
-    parts = {part.lower() for part in path.split("/") if part}
-    blocked_parts = {
-        "auth",
-        "chat",
-        "connector",
-        "document",
-        "documents",
-        "credential",
-        "credentials",
-        "file",
-        "files",
-        "ingestion",
-        "llm",
-        "mcp",
-        "oauth",
-        "persona",
-        "personas",
-        "project",
-        "projects",
-        "skill",
-        "skills",
-        "tenant",
-        "tool",
-        "tools",
-        "upload",
-        "user",
-        "users",
-    }
-    return bool(parts & blocked_parts)
+    normalized_path = "/" + path.split("?", 1)[0].strip().strip("/")
+    return normalized_path not in SHARED_PROFILE_ALLOWED_PATHS

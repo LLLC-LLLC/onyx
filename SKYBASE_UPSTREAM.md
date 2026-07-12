@@ -53,8 +53,9 @@ permitted.
   `scripts/verify-skybase-provenance.sh`, `backend/Dockerfile.skybase-ce`,
   `backend/requirements/skybase-ce.txt`, and
   `backend/supervisord.skybase-ce.conf`.
-- Host-only launch tools: `scripts/render-skybase-supabase-env.py` and
-  `scripts/run-skybase-ce-alembic.sh`.
+- Host-only launch tools: `scripts/render-skybase-supabase-env.py`,
+  `scripts/run-skybase-ce-alembic.sh`, and
+  `scripts/apply-skybase-ce-post-migration-grants.sh`.
 - Shared contract and engine paths: `backend/onyx/db/skybase_shared_supabase.py`,
   `backend/onyx/db/engine/sql_engine.py`,
   `backend/onyx/db/engine/async_sql_engine.py`,
@@ -77,7 +78,10 @@ later task may expand the allowlist only through a reviewed contract update.
 - The profile is opt-in through `SKYBASE_ONYX_SHARED_SUPABASE=true`; it fails
   before engine initialization unless it uses `skybase_onyx`, the Supabase
   `extensions` schema, verified TLS, named roles, and the fixed `<=12`
-  connection budget.
+  connection budget. The migration preflight also requires every controlled
+  role to be login-only, `NOINHERIT`, non-superuser, `NOBYPASSRLS`,
+  membership-free, connection-limited, and unable to create in `public` or
+  `extensions`; `skybase_onyx` must be owned by the migrator role.
 - Every sync, readonly, async, worker-child, and Alembic connection uses and
   asserts `search_path=skybase_onyx,extensions`. `public` is absent from the
   path; the only approved `public` access is explicit
@@ -94,20 +98,31 @@ later task may expand the allowlist only through a reviewed contract update.
   concurrency and database overflow are fixed to one and zero. Other native
   workers fail before `SqlEngine.init_engine()`.
 - Native credential, connector, identity, upload, chat, tenant, skill, tool,
-  and MCP surfaces are disabled. Skybase remains the owner of provider
-  credentials, connector configuration, identity, authorization, audit,
-  public API, and action execution.
+  and MCP surfaces are disabled. The shared-profile HTTP boundary is
+  default-deny: only `/health` is served in v1. Skybase remains the owner of
+  provider credentials, connector configuration, identity, authorization,
+  audit, public API, and action execution.
 
 ## Provider And Database Boundaries
 
-- Onyx receives no provider credentials. A later configuration slice must
-  allow only a Skybase LLM proxy base URL and reject direct provider base URLs.
+- Onyx receives no provider, connector, identity, storage, or telemetry
+  secrets. The profile accepts only the two generated database passwords and
+  rejects secret-shaped variables and native service namespaces, including
+  OpenRouter. A later configuration slice must introduce a reviewed Skybase
+  proxy contract instead of relaxing this boundary.
 - A later request-transport slice must calculate an exact-body HMAC at the
   LiteLLM HTTP boundary. Private Railway networking alone does not prove that
   direct provider egress is blocked.
 - PostgreSQL extension availability is a branch-bootstrap preflight:
   `pg_trgm` must already be in `extensions` and `pgcrypto` in `public`. This
   CE image never creates global extensions.
+- `skybase_onyx_kg_ro` has schema usage but no table or sequence grants in v1.
+  CE has no readonly retrieval caller, and raw document/KG tables carry
+  permission-bearing data. A future retrieval adapter must expose a reviewed,
+  permission-filtered view or service before adding a non-empty allowlist.
+- The host launchers parse only the renderer's known `KEY=value` fields and
+  start Alembic under a scrubbed environment. Unrelated desktop or CI secrets
+  are never inherited by the CE migration process.
 
 ## Update Procedure
 
@@ -122,8 +137,15 @@ later task may expand the allowlist only through a reviewed contract update.
 5. Create a new reviewed `skybase/<release-tag>` deployment baseline rather
    than rebasing the overlay onto upstream `main` implicitly.
 6. Render 0600 role files on the operator host, bootstrap only a disposable
-   branch, run `scripts/run-skybase-ce-alembic.sh`, and complete the schema
-   rehearsal and private runtime smoke gates before deploying a changed image.
+   branch with the rendered `bootstrap.sql`, then run
+   `scripts/run-skybase-ce-alembic.sh --env-file /absolute/path/migrator.env`.
+7. Only after the upgrade reaches Alembic head, run
+   `scripts/apply-skybase-ce-post-migration-grants.sh --env-file
+   /absolute/path/migrator.env --grants-file
+   /absolute/path/post-migrate-grants.sql`. The launcher accepts no arbitrary
+   SQL and verifies the generated grants checksum and migration head.
+8. Complete the schema rehearsal and private runtime smoke gates before
+   deploying a changed image.
 
 Do not merge a newer upstream release by changing only an image tag or only
 this document. The commit and tree are a coupled provenance pin.

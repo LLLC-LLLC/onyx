@@ -4,6 +4,9 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly REPO_ROOT="$(git -C "${SCRIPT_DIR}/.." rev-parse --show-toplevel)"
 
+# shellcheck source=scripts/_lib/skybase-ce-private-env.sh
+source "${SCRIPT_DIR}/_lib/skybase-ce-private-env.sh"
+
 usage() {
   printf 'usage: %s --env-file /absolute/path/to/migrator.env\n' "${0##*/}" >&2
   exit 64
@@ -11,16 +14,7 @@ usage() {
 
 [[ "$#" == "2" && "$1" == "--env-file" ]] || usage
 readonly ENV_FILE="$2"
-[[ -f "${ENV_FILE}" ]] || { printf 'missing env file\n' >&2; exit 65; }
-[[ "$(stat -f '%Lp' "${ENV_FILE}")" == "600" ]] || {
-  printf 'migrator env file must have mode 0600\n' >&2
-  exit 65
-}
-
-# shellcheck disable=SC1090
-set -a
-source "${ENV_FILE}"
-set +a
+load_skybase_ce_private_env "${ENV_FILE}"
 [[ "${SKYBASE_ONYX_SHARED_SUPABASE:-}" == "true" ]] || {
   printf 'shared-Supabase profile is required\n' >&2
   exit 65
@@ -39,4 +33,4 @@ set +a
 }
 
 cd "${REPO_ROOT}/backend"
-exec alembic -x create_schema=false -x schemas=skybase_onyx upgrade head
+run_with_skybase_ce_private_env alembic -x create_schema=false -x schemas=skybase_onyx upgrade head

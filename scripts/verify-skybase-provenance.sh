@@ -19,6 +19,8 @@ readonly T2_ALLOWED_OVERLAY_PATHS=(
     "scripts/verify-skybase-provenance.sh"
     "scripts/render-skybase-supabase-env.py"
     "scripts/run-skybase-ce-alembic.sh"
+    "scripts/apply-skybase-ce-post-migration-grants.sh"
+    "scripts/_lib/skybase-ce-private-env.sh"
     "backend/Dockerfile.skybase-ce"
     "backend/requirements/skybase-ce.txt"
     "backend/supervisord.skybase-ce.conf"
@@ -188,8 +190,8 @@ require_fixed_line "${PROVENANCE_FILE}" "- Upstream release tag: \`${EXPECTED_UP
 require_fixed_line "${PROVENANCE_FILE}" "- Upstream commit: \`${EXPECTED_UPSTREAM_COMMIT}\`"
 require_fixed_line "${PROVENANCE_FILE}" "- Upstream source tree: \`${EXPECTED_UPSTREAM_TREE}\`"
 require_fixed_line "${REQUIREMENTS_FILE}" "-r default.txt"
-require_fixed_line "${PROVENANCE_FILE}" "- Onyx receives no provider credentials. A later configuration slice must"
-require_fixed_line "${PROVENANCE_FILE}" "  allow only a Skybase LLM proxy base URL and reject direct provider base URLs."
+require_fixed_line "${PROVENANCE_FILE}" "- Onyx receives no provider, connector, identity, storage, or telemetry"
+require_fixed_line "${PROVENANCE_FILE}" "  secrets. The profile accepts only the two generated database passwords and"
 require_fixed_line "${PROVENANCE_FILE}" "  LiteLLM HTTP boundary. Private Railway networking alone does not prove that"
 require_fixed_line "${PROVENANCE_FILE}" "- PostgreSQL extension availability is a branch-bootstrap preflight:"
 
@@ -332,12 +334,21 @@ readonly SYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/sql_engine.py"
 readonly ASYNC_ENGINE_FILE="${REPO_ROOT}/backend/onyx/db/engine/async_sql_engine.py"
 readonly WARMUP_FILE="${REPO_ROOT}/backend/onyx/db/engine/connection_warmup.py"
 readonly ALEMBIC_ENV_FILE="${REPO_ROOT}/backend/alembic/env.py"
+readonly RENDERER_FILE="${REPO_ROOT}/scripts/render-skybase-supabase-env.py"
+readonly MIGRATION_LAUNCHER_FILE="${REPO_ROOT}/scripts/run-skybase-ce-alembic.sh"
+readonly GRANTS_LAUNCHER_FILE="${REPO_ROOT}/scripts/apply-skybase-ce-post-migration-grants.sh"
+readonly PRIVATE_ENV_LIB_FILE="${REPO_ROOT}/scripts/_lib/skybase-ce-private-env.sh"
 for contract_line in \
     'SEARCH_PATH: Final = f"{SHARED_SCHEMA},{EXTENSION_SCHEMA}"' \
     'MAX_RUNTIME_CONNECTIONS: Final = 12' \
     'ALLOWED_WORKER_APPS: Final = frozenset({"docfetching", "docprocessing"})' \
     'FILE_STORE_BACKEND' \
-    'The shared-Supabase profile accepts no native provider'; do
+    'ROLE_CONNECTION_LIMITS: Final' \
+    'rolbypassrls' \
+    'pg_catalog.pg_auth_members' \
+    'has_table_privilege' \
+    'SHARED_PROFILE_ALLOWED_PATHS: Final = frozenset({"/health"})' \
+    'The shared-Supabase profile accepts only its reviewed database'; do
     grep -Fq -- "${contract_line}" "${CONTRACT_FILE}" || \
         fail "shared contract is missing: ${contract_line}"
 done
@@ -349,6 +360,28 @@ grep -Fq -- 'Connection warmup is disabled in the shared-Supabase profile.' "${W
     fail "shared profile must disable legacy connection warmup"
 [[ "$(grep -Fc -- 'assert_shared_migration_preconditions(connection)' "${ALEMBIC_ENV_FILE}")" == "2" ]] || \
     fail "shared-profile Alembic paths must assert the reviewed catalog twice"
+for renderer_line in \
+    'NOBYPASSRLS CONNECTION LIMIT 1 PASSWORD' \
+    'NOBYPASSRLS CONNECTION LIMIT 12 PASSWORD' \
+    'ALTER SCHEMA skybase_onyx OWNER TO skybase_onyx_migrator;' \
+    'KG_READONLY_TABLE_ALLOWLIST: Final[tuple[str, ...]] = ()' \
+    'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA skybase_onyx FROM skybase_onyx_kg_ro;'; do
+    grep -Fq -- "${renderer_line}" "${RENDERER_FILE}" || \
+        fail "shared renderer is missing: ${renderer_line}"
+done
+if grep -Fq -- 'GRANT USAGE ON SCHEMA public' "${RENDERER_FILE}"; then
+    fail "shared renderer must not grant public schema usage"
+fi
+grep -Fq -- 'EXPECTED_GRANTS_SHA256=' "${GRANTS_LAUNCHER_FILE}" || \
+    fail "post-migration grants launcher must pin reviewed SQL"
+grep -Fq -- 'SELECT version_num FROM skybase_onyx.alembic_version' "${GRANTS_LAUNCHER_FILE}" || \
+    fail "post-migration grants launcher must verify Alembic head"
+for launcher_file in "${MIGRATION_LAUNCHER_FILE}" "${GRANTS_LAUNCHER_FILE}"; do
+    grep -Fq -- 'load_skybase_ce_private_env' "${launcher_file}" || \
+        fail "launcher must parse private env without sourcing it: ${launcher_file}"
+    grep -Fq -- 'run_with_skybase_ce_private_env' "${launcher_file}" || \
+        fail "launcher must scrub inherited environment values: ${launcher_file}"
+done
 
 for denied_worker in primary light heavy user_file_processing scheduled_tasks monitoring beat client; do
     grep -Fq -- "assert_worker_app_allowed(\"${denied_worker}\")" \
@@ -376,8 +409,9 @@ trap 'rm -f "${renderer_pyc}"' EXIT
 python3 -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' \
     "${REPO_ROOT}/scripts/render-skybase-supabase-env.py" "${renderer_pyc}" || \
     fail "shared-Supabase renderer does not compile"
-bash -n "${REPO_ROOT}/scripts/run-skybase-ce-alembic.sh" || \
-    fail "shared-Supabase Alembic launcher has invalid shell syntax"
+for shell_file in "${MIGRATION_LAUNCHER_FILE}" "${GRANTS_LAUNCHER_FILE}" "${PRIVATE_ENV_LIB_FILE}"; do
+    bash -n "${shell_file}" || fail "shared-Supabase shell tooling has invalid syntax: ${shell_file}"
+done
 
 printf 'skybase provenance verification passed for %s (%s)\n' \
     "${EXPECTED_UPSTREAM_TAG}" "${EXPECTED_UPSTREAM_COMMIT}"
